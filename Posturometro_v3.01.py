@@ -1899,7 +1899,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.snapshots[cond] = snap
             self.cmp_trails[cond] = trails
 
-        # mostrar todo
+        # mostrar
         if hasattr(self, "chk_no"):  self.chk_no.setChecked(True)
         if hasattr(self, "chk_occ"): self.chk_occ.setChecked(True)
         if hasattr(self, "chk_ce"):  self.chk_ce.setChecked(True)
