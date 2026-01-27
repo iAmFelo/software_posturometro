@@ -241,7 +241,7 @@ class NewSessionDialog(QtWidgets.QDialog):
         layout.addRow("Sesión:", self.edit_name)
 
         self.combo_cond = QtWidgets.QComboBox()
-        self.combo_cond.addItems(["Postura (NO)", "Boca (OCC)", "Pie (CE)"])
+        self.combo_cond.addItems([c["label"] for c in CONDITION_DEFS])
         layout.addRow("Condición:", self.combo_cond)
 
         self.chk_clear = QtWidgets.QCheckBox("Limpiar trayectorias al iniciar")
@@ -271,7 +271,9 @@ def normalize_condition(cond_text: str) -> str:
     if not cond_text:
         return "?"
     t = cond_text.strip().upper()
-    for key in ("NO", "OCC", "CE"):
+    if "BED CORREGIDO" in t or "BEDC" in t:
+        return "BEDC"
+    for key in CONDITION_CODES:
         if key in t:
             return key
     return cond_text.strip()
