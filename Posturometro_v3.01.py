@@ -24,21 +24,6 @@ DATA_DIR = "data"
 DB_PATH = os.path.join(DATA_DIR, "pacientes.db")
 PATIENTS_DIR = os.path.join(DATA_DIR, "Pacientes")
 
-SESSION_CONDITION_LABELS = [
-    "Postura (NO)",
-    "Boca (OCC)",
-    "Pie (CE)",
-    "BED",
-    "BED CORREGIDO",
-]
-SESSION_CONDITION_CODES = [
-    "BED CORREGIDO",
-    "BED",
-    "NO",
-    "OCC",
-    "CE",
-]
-
 FRAME_LEN = 14
 EMA_ALPHA = 0.12
 
@@ -256,7 +241,7 @@ class NewSessionDialog(QtWidgets.QDialog):
         layout.addRow("Sesión:", self.edit_name)
 
         self.combo_cond = QtWidgets.QComboBox()
-        self.combo_cond.addItems(SESSION_CONDITION_LABELS)
+        self.combo_cond.addItems([c["label"] for c in CONDITION_DEFS])
         layout.addRow("Condición:", self.combo_cond)
 
         self.chk_clear = QtWidgets.QCheckBox("Limpiar trayectorias al iniciar")
@@ -286,7 +271,9 @@ def normalize_condition(cond_text: str) -> str:
     if not cond_text:
         return "?"
     t = cond_text.strip().upper()
-    for key in SESSION_CONDITION_CODES:
+    if "BED CORREGIDO" in t or "BEDC" in t:
+        return "BEDC"
+    for key in CONDITION_CODES:
         if key in t:
             return key
     return cond_text.strip()
