@@ -43,23 +43,9 @@ COP_DOT_SIZE_G = 16
 COP_DOT_SIZE_F = 14
 KAP_DOT_SIZE = 22
 
-# Kapandji (colores por "intensidad" por sensor)
-#
-# En el primer enfoque calculábamos "% dentro del pie" (cada pie suma 100%).
-# Eso casi nunca llega a rojo cuando la carga está distribuida, y además no refleja
-# que cada punto suele tener un rango típico distinto (ej: laterales suelen cargar más
-# que los puntos de antepié). Para que tenga sentido clínico como lo usa tu mamá,
-# acá pasamos a una "intensidad" 0..100% por punto (valor / rango_típico).
-
-# Rangos típicos (AJUSTABLE): si querés calibrarlos, hacé 10-20 sesiones normales y mirá
-# los máximos por punto.
-KAP_MAX_TOP = 30.0      # puntos "arriba" (antepié)
-KAP_MAX_SIDE = 45.0     # puntos laterales
-KAP_MAX_HEEL = 60.0     # talón / calcáneo
-
-# Umbrales para colorear (sobre intensidad 0..100)
-KAP_THRESH_LOW = 60.0
-KAP_THRESH_HIGH = 85.0
+# Colores Kapandji según % dentro del pie
+KAP_THRESH_LOW = 30.0
+KAP_THRESH_HIGH = 45.0
 
 # PAUSA también frena grabación
 PAUSE_STOPS_RECORDING_WRITE = True
@@ -255,13 +241,7 @@ class NewSessionDialog(QtWidgets.QDialog):
         layout.addRow("Sesión:", self.edit_name)
 
         self.combo_cond = QtWidgets.QComboBox()
-        self.combo_cond.addItems([
-            "Postura (NO)",
-            "Boca (OCC)",
-            "Pie (CE)",
-            "Bed (BED)",
-            "Bed corregido (BEDC)",
-        ])
+        self.combo_cond.addItems(["Postura (NO)", "Boca (OCC)", "Pie (CE)"])
         layout.addRow("Condición:", self.combo_cond)
 
         self.chk_clear = QtWidgets.QCheckBox("Limpiar trayectorias al iniciar")
@@ -291,7 +271,7 @@ def normalize_condition(cond_text: str) -> str:
     if not cond_text:
         return "?"
     t = cond_text.strip().upper()
-    for key in ("NO", "OCC", "CE", "BED", "BEDC"):
+    for key in ("NO", "OCC", "CE"):
         if key in t:
             return key
     return cond_text.strip()
@@ -467,7 +447,7 @@ class MainWindow(QtWidgets.QMainWindow):
         topbar = QtWidgets.QHBoxLayout()
         right.addLayout(topbar)
 
-        self.btn_toggle_sidebar = QtWidgets.QPushButton("⟨⟨ Ocultar")
+        self.btn_toggle_sidebar = QtWidgets.QPushButton("⟨⟨")
         self.btn_toggle_sidebar.setFixedWidth(50)
         self.btn_toggle_sidebar.clicked.connect(self.toggle_sidebar)
         topbar.addWidget(self.btn_toggle_sidebar)
@@ -603,7 +583,23 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # ---- Tab: Comparativo ----
         self.tab_cmp = QtWidgets.QWidget()
-        v3 = QtWidgets.QVBoxLayout(self.tab_cmp)
+        self.tab_cmp = QtWidgets.QWidget()
+        self.tabs.addTab(self.tab_cmp, "Comparativo")
+
+        cmp_root = QtWidgets.QVBoxLayout(self.tab_cmp)
+        cmp_root.setContentsMargins(0, 0, 0, 0)
+
+        self.cmp_scroll = QtWidgets.QScrollArea()
+        self.cmp_scroll.setWidgetResizable(True)
+        cmp_root.addWidget(self.cmp_scroll, 1)
+
+        # Contenido real scrolleable
+        self.cmp_container = QtWidgets.QWidget()
+        self.cmp_scroll.setWidget(self.cmp_container)
+
+        v3 = QtWidgets.QVBoxLayout(self.cmp_container)
+        v3.setContentsMargins(10, 10, 10, 10)
+        v3.setSpacing(12)
 
         self.cmp_info = QtWidgets.QLabel(
             "Capturá Postura(NO)/Boca(OCC)/Pie(CE) para comparar. Arriba: superpuesto. Abajo: paneles separados.")
@@ -635,11 +631,6 @@ class MainWindow(QtWidgets.QMainWindow):
         ctrl.addSpacing(20)
         ctrl.addWidget(self.chk_show_cop)
         ctrl.addWidget(self.chk_show_tor)
-
-        self.btn_cmp_clear = QtWidgets.QPushButton("Limpiar comparativo")
-        self.btn_cmp_clear.clicked.connect(self.clear_comparative)
-        ctrl.addSpacing(20)
-        ctrl.addWidget(self.btn_cmp_clear)
         ctrl.addStretch(1)
 
         # ===== Leyenda de colores =====
@@ -656,6 +647,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_cmp_super.showGrid(x=True, y=True, alpha=0.2)
         self.plot_cmp_super.setXRange(X_MIN, X_MAX)
         self.plot_cmp_super.setYRange(Y_MIN, Y_MAX)
+        self.plot_cmp_super.setMinimumHeight(320)
         v3.addWidget(self.plot_cmp_super, 2)
 
         # líneas centro
@@ -675,16 +667,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_cmp_super.addItem(self.super_dot_occ)
         self.plot_cmp_super.addItem(self.super_dot_ce)
 
+        self.plot_cmp_super.setMouseEnabled(False, False)
+        self.plot_cmp_super.getViewBox().setMenuEnabled(False)
+
         # ===== Plot TRAZADOS COP (comparación) =====
         v3.addWidget(QtWidgets.QLabel("<b>Trazados COP (Izq / Global / Der)</b>"))
 
         self.plot_cmp_trails = pg.PlotWidget()
         self.plot_cmp_trails.setAspectLocked(True)
         self.plot_cmp_trails.showGrid(x=True, y=True, alpha=0.2)
-        # Trazados: más "cerca" (como te pidió tu mamá)
-        self.plot_cmp_trails.setXRange(-45, 45)
-        self.plot_cmp_trails.setYRange(-10, 30)
+        self.plot_cmp_trails.setXRange(-60, 60)
+        self.plot_cmp_trails.setYRange(Y_MIN, Y_MAX)
+        self.plot_cmp_trails.setMinimumHeight(400)
         v3.addWidget(self.plot_cmp_trails, 2)
+
+        self.plot_cmp_trails.setMouseEnabled(False, False)
+        self.plot_cmp_trails.getViewBox().setMenuEnabled(False)
 
         # líneas separadoras verticales (3 paneles)
         for x in [-20, 20]:
@@ -694,9 +692,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_cmp_trails.addItem(pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen("w", width=1)))
 
         # títulos paneles
-        for label, cx in [("Foot support (L)", -30), ("Barycenter (G)", 0), ("Foot support (R)", 30)]:
+        for label, cx in [("Foot support (L)", -40), ("Barycenter (G)", 0), ("Foot support (R)", 40)]:
             ti = pg.TextItem(label, anchor=(0.5, 0), color="w")
-            ti.setPos(cx, 29)
+            ti.setPos(cx, Y_MAX - 1)
             self.plot_cmp_trails.addItem(ti)
 
         # Curvas: global / izq / der, por condición
@@ -728,7 +726,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_cmp.showGrid(x=True, y=True, alpha=0.2)
         self.plot_cmp.setXRange(-60, 60)
         self.plot_cmp.setYRange(-20, 40)
+        self.plot_cmp.setMinimumHeight(600)
         v3.addWidget(self.plot_cmp, 3)
+
+        self.plot_cmp.setMouseEnabled(False, False)
+        self.plot_cmp.getViewBox().setMenuEnabled(False)
 
         self.tabs.addTab(self.tab_cmp, "Comparativo")
 
@@ -1175,29 +1177,14 @@ class MainWindow(QtWidgets.QMainWindow):
         R_lateral = p4
         R_forefoot = p5
 
-        # Intensidad por sensor (0..100) usando rangos típicos por punto
-        # (ver KAP_MAX_* arriba). Esto hace que "rojo" se active donde corresponde
-        # clínicamente, en vez de depender de que el pie sume 100.
-        def inten(v, vmax):
-            if vmax <= 0:
-                return 0.0
-            pct = 100.0 * float(v) / float(vmax)
-            if pct < 0:
-                pct = 0.0
-            if pct > 100.0:
-                pct = 100.0
-            return pct
+        def perc(a, b, c):
+            s = a + b + c
+            if s <= 0:
+                return (0.0, 0.0, 0.0)
+            return (100.0 * a / s, 100.0 * b / s, 100.0 * c / s)
 
-        kapL = (
-            inten(L_forefoot, KAP_MAX_TOP),
-            inten(L_lateral, KAP_MAX_SIDE),
-            inten(L_heel, KAP_MAX_HEEL),
-        )
-        kapR = (
-            inten(R_forefoot, KAP_MAX_TOP),
-            inten(R_lateral, KAP_MAX_SIDE),
-            inten(R_heel, KAP_MAX_HEEL),
-        )
+        kapL = perc(L_forefoot, L_lateral, L_heel)
+        kapR = perc(R_forefoot, R_lateral, R_heel)
         return kapL, kapR
 
 
@@ -1370,7 +1357,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 sc = pg.ScatterPlotItem(size=18, brush=pg.mkBrush(r, g, b), pen=pg.mkPen("w"))
                 sc.setData([x], [y])
                 self.plot_cmp.addItem(sc)
-                tt = pg.TextItem(f"{pct:0.1f}%", anchor=(0.5, -0.6), color="w")
+                tt = pg.TextItem(f"{pct:0.1f}", anchor=(0.5, -0.6), color="w")
                 tt.setPos(x, y)
                 self.plot_cmp.addItem(tt)
 
@@ -1392,7 +1379,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
 
         # offset por panel (en X)
-        panel_x = {"L": -30.0, "G": 0.0, "R": 30.0}
+        panel_x = {"L": -40.0, "G": 0.0, "R": 40.0}
 
         def set_curve(curve, pts, xoff, visible=True):
             curve.setVisible(visible)
@@ -1420,28 +1407,6 @@ class MainWindow(QtWidgets.QMainWindow):
             set_curve(self.tr_cmp[cond]["L"], tr.get("L", []), panel_x["L"], visible=vis)
             set_curve(self.tr_cmp[cond]["G"], tr.get("G", []), panel_x["G"], visible=vis)
             set_curve(self.tr_cmp[cond]["R"], tr.get("R", []), panel_x["R"], visible=vis)
-
-    def clear_comparative(self):
-        """Limpia el comparativo (capturas + trails cargados) sin borrar pacientes/sesiones."""
-        self.snapshots.clear()
-        self.cmp_trails.clear()
-
-        # limpiar items visibles
-        for it in [self.super_dot_no, self.super_dot_occ, self.super_dot_ce]:
-            it.setData([], [])
-        for ln in [self.super_t_no, self.super_t_occ, self.super_t_ce]:
-            ln.setData([], [])
-
-        if hasattr(self, "tr_cmp"):
-            for cond in ["NO", "OCC", "CE"]:
-                for comp in ["L", "G", "R"]:
-                    try:
-                        self.tr_cmp[cond][comp].setData([], [])
-                    except:
-                        pass
-
-        self.plot_cmp.clear()
-        self.statusBar().showMessage("Comparativo limpiado.")
 
     # ---------- Replay (síntesis) ----------
     def replay_selected_session(self):
@@ -1680,6 +1645,12 @@ class MainWindow(QtWidgets.QMainWindow):
             PL = fget(rr, ["PL"]);
             PR = fget(rr, ["PR"])
             tor = fget(rr, ["torsion_deg", "torsion", "torsionAngle"])
+            p0 = fget(rr, ["p0"]);
+            p1 = fget(rr, ["p1"]);
+            p2 = fget(rr, ["p2"])
+            p3 = fget(rr, ["p3"]);
+            p4 = fget(rr, ["p4"]);
+            p5 = fget(rr, ["p5"])
 
             if xg is None or yg is None:
                 continue
@@ -1698,23 +1669,21 @@ class MainWindow(QtWidgets.QMainWindow):
             if tor is not None:
                 tors.append(tor)
 
+            if None not in (p0, p1, p2, p3, p4, p5):
+                kapL, kapR = self.compute_kapandji_percents(p0, p1, p2, p3, p4, p5)
+                # kapL y kapR deberían ser [med, lat, heel] en %
+                kap["L_med"].append(kapL[0]);
+                kap["L_lat"].append(kapL[1]);
+                kap["L_heel"].append(kapL[2])
+                kap["R_med"].append(kapR[0]);
+                kap["R_lat"].append(kapR[1]);
+                kap["R_heel"].append(kapR[2])
+
             # Kapandji si existe en CSV (si no existe, queda vacío y luego cae a 0)
-            any_kap = False
             for k in kap.keys():
                 v = fget(rr, [k])
                 if v is not None:
                     kap[k].append(v)
-                    any_kap = True
-
-            # Si el CSV no trae columnas Kapandji, lo recalculamos desde p0..p5
-            # (porque session.csv siempre guarda presiones crudas)
-            if not any_kap:
-                p0 = fget(rr, ["p0"]); p1 = fget(rr, ["p1"]); p2 = fget(rr, ["p2"])
-                p3 = fget(rr, ["p3"]); p4 = fget(rr, ["p4"]); p5 = fget(rr, ["p5"])
-                if None not in (p0, p1, p2, p3, p4, p5):
-                    kapL, kapR = self.compute_kapandji_percents(p0, p1, p2, p3, p4, p5)
-                    kap["L_med"].append(kapL[0]); kap["L_lat"].append(kapL[1]); kap["L_heel"].append(kapL[2])
-                    kap["R_med"].append(kapR[0]); kap["R_lat"].append(kapR[1]); kap["R_heel"].append(kapR[2])
 
         def med(vals):
             if not vals:
@@ -1748,11 +1717,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         items = self.list_sessions.selectedItems()
-        if len(items) < 2:
-            QtWidgets.QMessageBox.warning(self, "Comparativo", "Seleccioná al menos 2 sesiones para comparar.")
-            return
-        if len(items) > 5:
-            QtWidgets.QMessageBox.warning(self, "Comparativo", "Seleccioná hasta 5 sesiones (para que sea legible).")
+        if len(items) != 3:
+            QtWidgets.QMessageBox.warning(self, "Comparativo", "Seleccioná exactamente 3 sesiones.")
             return
 
         _, pname, _ = self.current_patient
@@ -1779,7 +1745,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 try:
                     with open(meta_path, "r", encoding="utf-8") as f:
                         meta = json.load(f)
-                    cond = normalize_condition(meta.get("condition", None))
+                    cond = meta.get("condition", None)
                 except:
                     cond = None
 
@@ -1804,7 +1770,7 @@ class MainWindow(QtWidgets.QMainWindow):
             lay = QtWidgets.QVBoxLayout(dlg)
 
             lay.addWidget(QtWidgets.QLabel(
-                "No pude asignar NO/OCC/CE automáticamente.\nElegí qué sesión corresponde a cada condición:"
+                "Elegí qué sesión corresponde a cada condición:"
             ))
 
             labels = [s["label"] for s in sessions]
@@ -1812,7 +1778,6 @@ class MainWindow(QtWidgets.QMainWindow):
             row_no = QtWidgets.QHBoxLayout()
             row_no.addWidget(QtWidgets.QLabel("NO (Postura):"))
             cb_no = QtWidgets.QComboBox();
-            cb_no.addItem("(No usar)")
             cb_no.addItems(labels)
             row_no.addWidget(cb_no, 1)
             lay.addLayout(row_no)
@@ -1820,15 +1785,13 @@ class MainWindow(QtWidgets.QMainWindow):
             row_occ = QtWidgets.QHBoxLayout()
             row_occ.addWidget(QtWidgets.QLabel("OCC (Boca):"))
             cb_occ = QtWidgets.QComboBox();
-            cb_occ.addItem("(No usar)")
             cb_occ.addItems(labels)
             row_occ.addWidget(cb_occ, 1)
             lay.addLayout(row_occ)
 
             row_ce = QtWidgets.QHBoxLayout()
-            row_ce.addWidget(QtWidgets.QLabel("CE (Ojos cerrados/Pie según tu protocolo):"))
+            row_ce.addWidget(QtWidgets.QLabel("CE (Ojos cerrados/Pie):"))
             cb_ce = QtWidgets.QComboBox();
-            cb_ce.addItem("(No usar)")
             cb_ce.addItems(labels)
             row_ce.addWidget(cb_ce, 1)
             lay.addLayout(row_ce)
@@ -1837,7 +1800,7 @@ class MainWindow(QtWidgets.QMainWindow):
             def preselect(combo, cond):
                 for s in sessions:
                     if s["cond"] == cond:
-                        idx = labels.index(s["label"]) + 1  # +1 por "(No usar)"
+                        idx = labels.index(s["label"])
                         combo.setCurrentIndex(idx)
                         return
 
@@ -1857,10 +1820,9 @@ class MainWindow(QtWidgets.QMainWindow):
             pick_occ = cb_occ.currentText()
             pick_ce = cb_ce.currentText()
 
-            # evitar duplicados (permitiendo "(No usar)")
-            chosen = [p for p in [pick_no, pick_occ, pick_ce] if p != "(No usar)"]
-            if len(set(chosen)) != len(chosen):
-                QtWidgets.QMessageBox.warning(self, "Comparativo", "Elegiste la misma sesión para dos condiciones. Elegí sesiones distintas o poné '(No usar)'.")
+            # evitar duplicados
+            if len({pick_no, pick_occ, pick_ce}) != 3:
+                QtWidgets.QMessageBox.warning(self, "Comparativo", "Tenés que elegir 3 sesiones distintas (NO/OCC/CE).")
                 return
 
             def find_by_label(lbl):
@@ -1869,27 +1831,18 @@ class MainWindow(QtWidgets.QMainWindow):
                         return s
                 return None
 
-            mapping = {}
-            if pick_no != "(No usar)":
-                mapping["NO"] = find_by_label(pick_no)
-            if pick_occ != "(No usar)":
-                mapping["OCC"] = find_by_label(pick_occ)
-            if pick_ce != "(No usar)":
-                mapping["CE"] = find_by_label(pick_ce)
+            mapping = {
+                "NO": find_by_label(pick_no),
+                "OCC": find_by_label(pick_occ),
+                "CE": find_by_label(pick_ce),
+            }
             if any(v is None for v in mapping.values()):
                 QtWidgets.QMessageBox.warning(self, "Comparativo", "Error asignando sesiones.")
                 return
 
         # ---- cargar snapshots + trails ----
         for cond in ["NO", "OCC", "CE"]:
-            s = mapping.get(cond)
-            if not s:
-                # no seleccionado
-                if cond in self.snapshots:
-                    del self.snapshots[cond]
-                if cond in self.cmp_trails:
-                    del self.cmp_trails[cond]
-                continue
+            s = mapping[cond]
             snap, trails = self._load_trails_and_snapshot(s["csv_path"])
             if snap is None or trails is None:
                 QtWidgets.QMessageBox.warning(self, "Comparativo", f"CSV vacío o inválido:\n{s['csv_path']}")
@@ -1899,7 +1852,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.snapshots[cond] = snap
             self.cmp_trails[cond] = trails
 
-        # mostrar
+        # mostrar todo
         if hasattr(self, "chk_no"):  self.chk_no.setChecked(True)
         if hasattr(self, "chk_occ"): self.chk_occ.setChecked(True)
         if hasattr(self, "chk_ce"):  self.chk_ce.setChecked(True)
