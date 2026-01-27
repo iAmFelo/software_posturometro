@@ -32,6 +32,11 @@ PLOT_RANGE = 15  # -> X,Y = [-15..+15]
 X_MIN, X_MAX = -PLOT_RANGE, PLOT_RANGE
 Y_MIN, Y_MAX = -PLOT_RANGE, PLOT_RANGE
 
+# Zoom de trazados en comparativo (más cercano)
+CMP_TRAIL_X_RANGE = 45
+CMP_TRAIL_Y_RANGE = 12
+CMP_PANEL_OFFSETS = {"L": -30.0, "G": 0.0, "R": 30.0}
+
 # Longitud de trayectoria (más corto = más “limpio”)
 TRAIL_LEN = 800
 
@@ -43,9 +48,12 @@ COP_DOT_SIZE_G = 16
 COP_DOT_SIZE_F = 14
 KAP_DOT_SIZE = 22
 
+# Umbral en % para mostrar flecha de balance en comparativo
+BALANCE_ARROW_THRESHOLD = 2.0
+
 # Colores Kapandji según % dentro del pie
-KAP_THRESH_LOW = 30.0
-KAP_THRESH_HIGH = 45.0
+KAP_THRESH_LOW = 20.0
+KAP_THRESH_HIGH = 30.0
 
 # PAUSA también frena grabación
 PAUSE_STOPS_RECORDING_WRITE = True
@@ -55,6 +63,17 @@ AUTO_CONNECT_ON_START = True
 
 # Cambiar sentido de torsion (T/F)
 INVERT_TORSION_SIGN = False  # ponelo True si la torsión sale al revés
+
+# Condiciones disponibles y colores
+CONDITION_DEFS = [
+    {"code": "NO", "label": "Postura (NO)", "short": "NO", "color": "c", "color_html": "cyan"},
+    {"code": "OCC", "label": "Boca (OCC)", "short": "OCC", "color": "y", "color_html": "yellow"},
+    {"code": "CE", "label": "Pie (CE)", "short": "CE", "color": "m", "color_html": "magenta"},
+    {"code": "BED", "label": "Bed (BED)", "short": "BED", "color": (255, 140, 0), "color_html": "#ff8c00"},
+    {"code": "BEDC", "label": "Bed Corregido (BEDC)", "short": "BEDC", "color": (128, 96, 255), "color_html": "#8060ff"},
+]
+CONDITION_CODES = [c["code"] for c in CONDITION_DEFS]
+CONDITION_BY_CODE = {c["code"]: c for c in CONDITION_DEFS}
 
 
 # ===================== UTIL =====================
@@ -362,8 +381,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.recent = deque(maxlen=METRIC_WINDOW)
 
         # Capturas estabilizadas por condición
-        self.snapshots = {"NO": None, "OCC": None, "CE": None}
-        self.cmp_trails = {}  # {"NO":{"L":[(x,y)],"G":[...],"R":[...]}, "OCC":..., "CE":...}
+        self.snapshots = {code: None for code in CONDITION_CODES}
+        self.cmp_trails = {}  # {"NO":{"L":[(x,y)],"G":[...],"R":[...]}, ...}
 
         # ===== Replay animado =====
         self.replay_data = None  # dict con arrays
@@ -518,15 +537,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         cap_row = QtWidgets.QHBoxLayout()
         v1.addLayout(cap_row)
-        self.btn_cap_no = QtWidgets.QPushButton("Capturar Postura (NO)")
-        self.btn_cap_occ = QtWidgets.QPushButton("Capturar Boca (OCC)")
-        self.btn_cap_ce = QtWidgets.QPushButton("Capturar Pie (CE)")
-        self.btn_cap_no.clicked.connect(lambda: self.capture_condition("NO"))
-        self.btn_cap_occ.clicked.connect(lambda: self.capture_condition("OCC"))
-        self.btn_cap_ce.clicked.connect(lambda: self.capture_condition("CE"))
-        cap_row.addWidget(self.btn_cap_no)
-        cap_row.addWidget(self.btn_cap_occ)
-        cap_row.addWidget(self.btn_cap_ce)
+        self.capture_buttons = {}
+        for cond in CONDITION_DEFS:
+            code = cond["code"]
+            btn = QtWidgets.QPushButton(f"Capturar {cond['label']}")
+            btn.clicked.connect(lambda _, c=code: self.capture_condition(c))
+            cap_row.addWidget(btn)
+            self.capture_buttons[code] = btn
         cap_row.addStretch(1)
 
         self.plot_live = pg.PlotWidget()
@@ -574,11 +591,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_tor.addItem(pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen("w", width=1)))
 
         self.line_t_live = self.plot_tor.plot([], [], pen=pg.mkPen("w", width=3))
-        self.line_t_no = self.plot_tor.plot([], [], pen=pg.mkPen("c", width=3))
-        self.line_t_occ = self.plot_tor.plot([], [], pen=pg.mkPen("y", width=3))
-        self.line_t_ce = self.plot_tor.plot([], [], pen=pg.mkPen("m", width=3))
+        self.line_t_by_cond = {}
+        for cond in CONDITION_DEFS:
+            code = cond["code"]
+            color = cond["color"]
+            self.line_t_by_cond[code] = self.plot_tor.plot([], [], pen=pg.mkPen(color, width=3))
 
-        self.lbl_tor_hint = QtWidgets.QLabel("Blanco: Live | Cian: NO | Amarillo: OCC | Magenta: CE")
+        legend_parts = ["Blanco: Live"]
+        for cond in CONDITION_DEFS:
+            legend_parts.append(f"{cond['short']}: {cond['label']}")
+        self.lbl_tor_hint = QtWidgets.QLabel(" | ".join(legend_parts))
         v2.addWidget(self.lbl_tor_hint)
 
         self.tabs.addTab(self.tab_tor, "Torsión")
@@ -604,43 +626,45 @@ class MainWindow(QtWidgets.QMainWindow):
         v3.setSpacing(12)
 
         self.cmp_info = QtWidgets.QLabel(
-            "Capturá Postura(NO)/Boca(OCC)/Pie(CE) para comparar. Arriba: superpuesto. Abajo: paneles separados.")
+            "Capturá condiciones o cargá sesiones para comparar. Arriba: superpuesto. Abajo: paneles separados.")
         v3.addWidget(self.cmp_info)
 
         # ===== Controles (check) =====
         ctrl = QtWidgets.QHBoxLayout()
         v3.addLayout(ctrl)
 
-        self.chk_no = QtWidgets.QCheckBox("NO")
-        self.chk_occ = QtWidgets.QCheckBox("OCC")
-        self.chk_ce = QtWidgets.QCheckBox("CE")
-        self.chk_no.setChecked(True)
-        self.chk_occ.setChecked(True)
-        self.chk_ce.setChecked(True)
+        self.cmp_checks = {}
+        for cond in CONDITION_DEFS:
+            chk = QtWidgets.QCheckBox(cond["short"])
+            chk.setChecked(True)
+            self.cmp_checks[cond["code"]] = chk
 
         self.chk_show_cop = QtWidgets.QCheckBox("COP")
         self.chk_show_tor = QtWidgets.QCheckBox("Torsión")
         self.chk_show_cop.setChecked(True)
         self.chk_show_tor.setChecked(True)
 
-        for w in [self.chk_no, self.chk_occ, self.chk_ce, self.chk_show_cop, self.chk_show_tor]:
+        for w in list(self.cmp_checks.values()) + [self.chk_show_cop, self.chk_show_tor]:
             w.stateChanged.connect(self.render_comparative)
 
         ctrl.addWidget(QtWidgets.QLabel("<b>Mostrar:</b>"))
-        ctrl.addWidget(self.chk_no)
-        ctrl.addWidget(self.chk_occ)
-        ctrl.addWidget(self.chk_ce)
+        for chk in self.cmp_checks.values():
+            ctrl.addWidget(chk)
         ctrl.addSpacing(20)
         ctrl.addWidget(self.chk_show_cop)
         ctrl.addWidget(self.chk_show_tor)
+        self.btn_cmp_clear = QtWidgets.QPushButton("Limpiar comparativo")
+        self.btn_cmp_clear.clicked.connect(self.clear_comparative)
+        ctrl.addSpacing(12)
+        ctrl.addWidget(self.btn_cmp_clear)
         ctrl.addStretch(1)
 
         # ===== Leyenda de colores =====
-        self.lbl_cmp_legend = QtWidgets.QLabel(
-            '<span style="color:cyan;"><b>Postura (NO)</b></span>  |  '
-            '<span style="color:yellow;"><b>Boca (OCC)</b></span>  |  '
-            '<span style="color:magenta;"><b>Pie (CE)</b></span>'
+        legend_html = "  |  ".join(
+            f'<span style="color:{cond["color_html"]};"><b>{cond["label"]}</b></span>'
+            for cond in CONDITION_DEFS
         )
+        self.lbl_cmp_legend = QtWidgets.QLabel(legend_html)
         v3.addWidget(self.lbl_cmp_legend)
 
         # ===== Plot SUPERPUESTO (arriba) =====
@@ -657,17 +681,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_cmp_super.addItem(pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen("w", width=1)))
 
         # Items superpuestos (COP + torsión) por condición
-        self.super_dot_no = pg.ScatterPlotItem(size=20, brush=pg.mkBrush("c"), pen=pg.mkPen(None))
-        self.super_dot_occ = pg.ScatterPlotItem(size=20, brush=pg.mkBrush("y"), pen=pg.mkPen(None))
-        self.super_dot_ce = pg.ScatterPlotItem(size=20, brush=pg.mkBrush("m"), pen=pg.mkPen(None))
-
-        self.super_t_no = self.plot_cmp_super.plot([], [], pen=pg.mkPen("c", width=3))
-        self.super_t_occ = self.plot_cmp_super.plot([], [], pen=pg.mkPen("y", width=3))
-        self.super_t_ce = self.plot_cmp_super.plot([], [], pen=pg.mkPen("m", width=3))
-
-        self.plot_cmp_super.addItem(self.super_dot_no)
-        self.plot_cmp_super.addItem(self.super_dot_occ)
-        self.plot_cmp_super.addItem(self.super_dot_ce)
+        self.super_dots = {}
+        self.super_t_lines = {}
+        for cond in CONDITION_DEFS:
+            code = cond["code"]
+            color = cond["color"]
+            dot = pg.ScatterPlotItem(size=20, brush=pg.mkBrush(color), pen=pg.mkPen(None))
+            line = self.plot_cmp_super.plot([], [], pen=pg.mkPen(color, width=3))
+            self.plot_cmp_super.addItem(dot)
+            self.super_dots[code] = dot
+            self.super_t_lines[code] = line
 
         self.plot_cmp_super.setMouseEnabled(False, False)
         self.plot_cmp_super.getViewBox().setMenuEnabled(False)
@@ -678,8 +701,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_cmp_trails = pg.PlotWidget()
         self.plot_cmp_trails.setAspectLocked(True)
         self.plot_cmp_trails.showGrid(x=True, y=True, alpha=0.2)
-        self.plot_cmp_trails.setXRange(-60, 60)
-        self.plot_cmp_trails.setYRange(Y_MIN, Y_MAX)
+        self.plot_cmp_trails.setXRange(-CMP_TRAIL_X_RANGE, CMP_TRAIL_X_RANGE)
+        self.plot_cmp_trails.setYRange(-CMP_TRAIL_Y_RANGE, CMP_TRAIL_Y_RANGE)
         self.plot_cmp_trails.setMinimumHeight(400)
         v3.addWidget(self.plot_cmp_trails, 2)
 
@@ -687,37 +710,34 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_cmp_trails.getViewBox().setMenuEnabled(False)
 
         # líneas separadoras verticales (3 paneles)
-        for x in [-20, 20]:
+        for x in [
+            (CMP_PANEL_OFFSETS["L"] + CMP_PANEL_OFFSETS["G"]) / 2.0,
+            (CMP_PANEL_OFFSETS["G"] + CMP_PANEL_OFFSETS["R"]) / 2.0,
+        ]:
             self.plot_cmp_trails.addItem(pg.InfiniteLine(pos=x, angle=90, pen=pg.mkPen(120, 120, 120)))
 
         # línea central horizontal y vertical por panel (para referencia)
         self.plot_cmp_trails.addItem(pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen("w", width=1)))
 
         # títulos paneles
-        for label, cx in [("Foot support (L)", -40), ("Barycenter (G)", 0), ("Foot support (R)", 40)]:
+        for label, cx in [("Foot support (L)", CMP_PANEL_OFFSETS["L"]),
+                          ("Barycenter (G)", CMP_PANEL_OFFSETS["G"]),
+                          ("Foot support (R)", CMP_PANEL_OFFSETS["R"])]:
             ti = pg.TextItem(label, anchor=(0.5, 0), color="w")
-            ti.setPos(cx, Y_MAX - 1)
+            ti.setPos(cx, CMP_TRAIL_Y_RANGE - 1)
             self.plot_cmp_trails.addItem(ti)
 
         # Curvas: global / izq / der, por condición
-        # Colores: NO=cian, OCC=amarillo, CE=magenta (igual que arriba)
-        self.tr_cmp = {
-            "NO": {
-                "L": self.plot_cmp_trails.plot([], [], pen=pg.mkPen("c", width=2)),
-                "G": self.plot_cmp_trails.plot([], [], pen=pg.mkPen("c", width=3)),
-                "R": self.plot_cmp_trails.plot([], [], pen=pg.mkPen("c", width=2)),
-            },
-            "OCC": {
-                "L": self.plot_cmp_trails.plot([], [], pen=pg.mkPen("y", width=2)),
-                "G": self.plot_cmp_trails.plot([], [], pen=pg.mkPen("y", width=3)),
-                "R": self.plot_cmp_trails.plot([], [], pen=pg.mkPen("y", width=2)),
-            },
-            "CE": {
-                "L": self.plot_cmp_trails.plot([], [], pen=pg.mkPen("m", width=2)),
-                "G": self.plot_cmp_trails.plot([], [], pen=pg.mkPen("m", width=3)),
-                "R": self.plot_cmp_trails.plot([], [], pen=pg.mkPen("m", width=2)),
+        # Colores definidos en CONDITION_DEFS
+        self.tr_cmp = {}
+        for cond in CONDITION_DEFS:
+            code = cond["code"]
+            color = cond["color"]
+            self.tr_cmp[code] = {
+                "L": self.plot_cmp_trails.plot([], [], pen=pg.mkPen(color, width=2)),
+                "G": self.plot_cmp_trails.plot([], [], pen=pg.mkPen(color, width=3)),
+                "R": self.plot_cmp_trails.plot([], [], pen=pg.mkPen(color, width=2)),
             }
-        }
 
         # ===== Separador visual =====
         v3.addWidget(QtWidgets.QLabel("<hr>"))
@@ -726,7 +746,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_cmp = pg.PlotWidget()
         self.plot_cmp.setAspectLocked(True)
         self.plot_cmp.showGrid(x=True, y=True, alpha=0.2)
-        self.plot_cmp.setXRange(-60, 60)
+        self.plot_cmp.setXRange(-70, 70)
         self.plot_cmp.setYRange(-20, 40)
         self.plot_cmp.setMinimumHeight(600)
         v3.addWidget(self.plot_cmp, 3)
@@ -1160,6 +1180,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.last_processed = None
         self.statusBar().showMessage("Limpio (trayectorias y métricas).")
 
+    def clear_comparative(self):
+        for code in CONDITION_CODES:
+            self.snapshots[code] = None
+        self.cmp_trails = {}
+        self.render_comparative()
+
     # ---------- Kapandji / Torsión helpers ----------
     def compute_kapandji_percents(self, p0, p1, p2, p3, p4, p5):
         # Orden REAL de tu Arduino:
@@ -1244,21 +1270,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"Capturado {cond} (estabilizado).")
         self.render_comparative()
 
+    def _condition_panel_positions(self):
+        count = len(CONDITION_DEFS)
+        if count <= 1:
+            return {CONDITION_DEFS[0]["code"]: 0.0} if count == 1 else {}
+        start = -60.0
+        end = 60.0
+        step = (end - start) / (count - 1)
+        return {cond["code"]: start + idx * step for idx, cond in enumerate(CONDITION_DEFS)}
+
     def render_comparative(self):
         # Trazados COP comparativos: si no están inicializados, igual dibujamos el resto
-        has_trails = hasattr(self, "tr_cmp")
-        if has_trails:
-            for k in ["NO", "OCC", "CE"]:
-                if k not in self.tr_cmp:
-                    has_trails = False
-                    break
+        has_trails = hasattr(self, "tr_cmp") and all(k in self.tr_cmp for k in CONDITION_CODES)
 
         # -------- SUPERPUESTO (arriba) --------
         def show_cond(cond: str) -> bool:
-            if cond == "NO":  return self.chk_no.isChecked()
-            if cond == "OCC": return self.chk_occ.isChecked()
-            if cond == "CE":  return self.chk_ce.isChecked()
-            return True
+            chk = self.cmp_checks.get(cond)
+            return chk.isChecked() if chk else True
 
         show_cop = self.chk_show_cop.isChecked()
         show_tor = self.chk_show_tor.isChecked()
@@ -1279,44 +1307,34 @@ class MainWindow(QtWidgets.QMainWindow):
                 line_item.setData([], [])
 
         # leer snapshots
-        sNO = self.snapshots.get("NO")
-        sOCC = self.snapshots.get("OCC")
-        sCE = self.snapshots.get("CE")
-
         # COP superpuesto
-        if sNO:
-            set_dot(self.super_dot_no, sNO["xg"], sNO["yg"], show_cond("NO") and show_cop)
-            xs, ys = self.segment_for_angle(sNO["torsion_deg"], length=20.0)
-            set_line(self.super_t_no, xs, ys, show_cond("NO") and show_tor)
-        else:
-            set_dot(self.super_dot_no, 0, 0, False)
-            set_line(self.super_t_no, [], [], False)
-
-        if sOCC:
-            set_dot(self.super_dot_occ, sOCC["xg"], sOCC["yg"], show_cond("OCC") and show_cop)
-            xs, ys = self.segment_for_angle(sOCC["torsion_deg"], length=20.0)
-            set_line(self.super_t_occ, xs, ys, show_cond("OCC") and show_tor)
-        else:
-            set_dot(self.super_dot_occ, 0, 0, False)
-            set_line(self.super_t_occ, [], [], False)
-
-        if sCE:
-            set_dot(self.super_dot_ce, sCE["xg"], sCE["yg"], show_cond("CE") and show_cop)
-            xs, ys = self.segment_for_angle(sCE["torsion_deg"], length=20.0)
-            set_line(self.super_t_ce, xs, ys, show_cond("CE") and show_tor)
-        else:
-            set_dot(self.super_dot_ce, 0, 0, False)
-            set_line(self.super_t_ce, [], [], False)
+        for cond in CONDITION_CODES:
+            snap = self.snapshots.get(cond)
+            dot = self.super_dots.get(cond)
+            line = self.super_t_lines.get(cond)
+            if not dot or not line:
+                continue
+            if snap:
+                set_dot(dot, snap["xg"], snap["yg"], show_cond(cond) and show_cop)
+                xs, ys = self.segment_for_angle(snap["torsion_deg"], length=20.0)
+                set_line(line, xs, ys, show_cond(cond) and show_tor)
+            else:
+                set_dot(dot, 0, 0, False)
+                set_line(line, [], [], False)
 
         # -------- PANEL (abajo) --------
         self.plot_cmp.clear()
         self.plot_cmp.showGrid(x=True, y=True, alpha=0.2)
 
-        for x in [-20, 20]:
-            self.plot_cmp.addItem(pg.InfiniteLine(pos=x, angle=90, pen=pg.mkPen(120, 120, 120)))
+        panel_positions = self._condition_panel_positions()
+        positions = [panel_positions[c["code"]] for c in CONDITION_DEFS]
+        for i in range(len(positions) - 1):
+            mid = (positions[i] + positions[i + 1]) / 2.0
+            self.plot_cmp.addItem(pg.InfiniteLine(pos=mid, angle=90, pen=pg.mkPen(120, 120, 120)))
 
-        titles = [("POS", -40), ("BOCA", 0), ("PIE", 40)]
-        for label, cx in titles:
+        for cond in CONDITION_DEFS:
+            label = cond["short"]
+            cx = panel_positions[cond["code"]]
             ti = pg.TextItem(label, anchor=(0.5, 0), color="w")
             ti.setPos(cx, 35)
             self.plot_cmp.addItem(ti)
@@ -1342,7 +1360,15 @@ class MainWindow(QtWidgets.QMainWindow):
             left_pct = (100 * PL / total) if total > 0 else 0
             right_pct = (100 * PR / total) if total > 0 else 0
 
-            info = f"L {left_pct:0.1f}% | R {right_pct:0.1f}%\nOverload {overload:0.2f}"
+            delta_lr = right_pct - left_pct
+            if delta_lr > BALANCE_ARROW_THRESHOLD:
+                arrow = "→"
+            elif delta_lr < -BALANCE_ARROW_THRESHOLD:
+                arrow = "←"
+            else:
+                arrow = "↔"
+
+            info = f"L {left_pct:0.1f}% | R {right_pct:0.1f}% {arrow}\nOverload {overload:0.2f}"
             tinfo = pg.TextItem(info, anchor=(0.5, 1.0), color="w")
             tinfo.setPos(cx, -15)
             self.plot_cmp.addItem(tinfo)
@@ -1369,19 +1395,18 @@ class MainWindow(QtWidgets.QMainWindow):
             ys = [y + 25 for y in ys]
             self.plot_cmp.plot(xs, ys, pen=color_pen)
 
-        draw_panel("NO", -40, pg.mkPen("c", width=3))
-        draw_panel("OCC", 0, pg.mkPen("y", width=3))
-        draw_panel("CE", 40, pg.mkPen("m", width=3))
+        for cond in CONDITION_DEFS:
+            code = cond["code"]
+            cx = panel_positions[code]
+            draw_panel(code, cx, pg.mkPen(cond["color"], width=3))
 
         # -------- TRAZADOS COP (L / G / R) --------
         def _cond_visible(cond: str) -> bool:
-            if cond == "NO":  return self.chk_no.isChecked()
-            if cond == "OCC": return self.chk_occ.isChecked()
-            if cond == "CE":  return self.chk_ce.isChecked()
-            return True
+            chk = self.cmp_checks.get(cond)
+            return chk.isChecked() if chk else True
 
         # offset por panel (en X)
-        panel_x = {"L": -40.0, "G": 0.0, "R": 40.0}
+        panel_x = CMP_PANEL_OFFSETS
 
         def set_curve(curve, pts, xoff, visible=True):
             curve.setVisible(visible)
@@ -1397,7 +1422,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         # si no hay trails cargados, vaciamos
-        for cond in ["NO", "OCC", "CE"]:
+        for cond in CONDITION_CODES:
             vis = _cond_visible(cond)
             tr = self.cmp_trails.get(cond)
 
@@ -1719,8 +1744,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         items = self.list_sessions.selectedItems()
-        if len(items) != 3:
-            QtWidgets.QMessageBox.warning(self, "Comparativo", "Seleccioná exactamente 3 sesiones.")
+        if len(items) < 2 or len(items) > 5:
+            QtWidgets.QMessageBox.warning(self, "Comparativo", "Seleccioná entre 2 y 5 sesiones.")
             return
 
         _, pname, _ = self.current_patient
@@ -1747,7 +1772,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 try:
                     with open(meta_path, "r", encoding="utf-8") as f:
                         meta = json.load(f)
-                    cond = meta.get("condition", None)
+                    cond = normalize_condition(meta.get("condition", None))
                 except:
                     cond = None
 
@@ -1755,60 +1780,41 @@ class MainWindow(QtWidgets.QMainWindow):
                 "label": it.text(),  # lo que ve el usuario
                 "folder": folder,  # carpeta real
                 "csv_path": csv_path,
-                "cond": cond  # NO/OCC/CE o None
+                "cond": cond  # condición normalizada o None
             })
 
         # ---- 1) mapear por meta.json si se puede ----
         mapping = {}
+        needs_manual = False
         for s in sessions:
-            if s["cond"] in ("NO", "OCC", "CE") and s["cond"] not in mapping:
+            if s["cond"] in CONDITION_CODES and s["cond"] not in mapping:
                 mapping[s["cond"]] = s
+            else:
+                needs_manual = True
 
-        # ---- 2) si falta algo, pedir asignación manual (sin “orden de click”) ----
-        if set(mapping.keys()) != {"NO", "OCC", "CE"}:
-            # diálogo simple con 3 combos: NO/OCC/CE
+        # ---- 2) si falta algo o hay duplicados, pedir asignación manual ----
+        if needs_manual or len(mapping) != len(sessions):
             dlg = QtWidgets.QDialog(self)
             dlg.setWindowTitle("Asignar condiciones a sesiones")
             lay = QtWidgets.QVBoxLayout(dlg)
 
             lay.addWidget(QtWidgets.QLabel(
-                "Elegí qué sesión corresponde a cada condición:"
+                "Asigná una condición distinta a cada sesión seleccionada:"
             ))
 
-            labels = [s["label"] for s in sessions]
-
-            row_no = QtWidgets.QHBoxLayout()
-            row_no.addWidget(QtWidgets.QLabel("NO (Postura):"))
-            cb_no = QtWidgets.QComboBox();
-            cb_no.addItems(labels)
-            row_no.addWidget(cb_no, 1)
-            lay.addLayout(row_no)
-
-            row_occ = QtWidgets.QHBoxLayout()
-            row_occ.addWidget(QtWidgets.QLabel("OCC (Boca):"))
-            cb_occ = QtWidgets.QComboBox();
-            cb_occ.addItems(labels)
-            row_occ.addWidget(cb_occ, 1)
-            lay.addLayout(row_occ)
-
-            row_ce = QtWidgets.QHBoxLayout()
-            row_ce.addWidget(QtWidgets.QLabel("CE (Ojos cerrados/Pie):"))
-            cb_ce = QtWidgets.QComboBox();
-            cb_ce.addItems(labels)
-            row_ce.addWidget(cb_ce, 1)
-            lay.addLayout(row_ce)
-
-            # sugerencia: si alguna venía con cond en meta, preseleccionarla
-            def preselect(combo, cond):
-                for s in sessions:
-                    if s["cond"] == cond:
-                        idx = labels.index(s["label"])
-                        combo.setCurrentIndex(idx)
-                        return
-
-            preselect(cb_no, "NO");
-            preselect(cb_occ, "OCC");
-            preselect(cb_ce, "CE")
+            condition_labels = [c["label"] for c in CONDITION_DEFS]
+            label_to_code = {c["label"]: c["code"] for c in CONDITION_DEFS}
+            rows = []
+            for s in sessions:
+                row = QtWidgets.QHBoxLayout()
+                row.addWidget(QtWidgets.QLabel(s["label"]))
+                combo = QtWidgets.QComboBox()
+                combo.addItems(condition_labels)
+                if s["cond"] in CONDITION_BY_CODE:
+                    combo.setCurrentText(CONDITION_BY_CODE[s["cond"]]["label"])
+                row.addWidget(combo, 1)
+                lay.addLayout(row)
+                rows.append((s, combo))
 
             btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
             lay.addWidget(btns)
@@ -1818,33 +1824,27 @@ class MainWindow(QtWidgets.QMainWindow):
             if dlg.exec() != QtWidgets.QDialog.Accepted:
                 return
 
-            pick_no = cb_no.currentText()
-            pick_occ = cb_occ.currentText()
-            pick_ce = cb_ce.currentText()
+            picked_codes = []
+            for s, combo in rows:
+                code = label_to_code.get(combo.currentText())
+                picked_codes.append(code)
 
-            # evitar duplicados
-            if len({pick_no, pick_occ, pick_ce}) != 3:
-                QtWidgets.QMessageBox.warning(self, "Comparativo", "Tenés que elegir 3 sesiones distintas (NO/OCC/CE).")
+            if any(code is None for code in picked_codes):
+                QtWidgets.QMessageBox.warning(self, "Comparativo", "Error asignando condiciones.")
                 return
 
-            def find_by_label(lbl):
-                for s in sessions:
-                    if s["label"] == lbl:
-                        return s
-                return None
-
-            mapping = {
-                "NO": find_by_label(pick_no),
-                "OCC": find_by_label(pick_occ),
-                "CE": find_by_label(pick_ce),
-            }
-            if any(v is None for v in mapping.values()):
-                QtWidgets.QMessageBox.warning(self, "Comparativo", "Error asignando sesiones.")
+            if len(set(picked_codes)) != len(picked_codes):
+                QtWidgets.QMessageBox.warning(self, "Comparativo", "Cada sesión debe tener una condición distinta.")
                 return
+
+            mapping = {code: sessions[idx] for idx, code in enumerate(picked_codes)}
 
         # ---- cargar snapshots + trails ----
-        for cond in ["NO", "OCC", "CE"]:
-            s = mapping[cond]
+        for code in CONDITION_CODES:
+            self.snapshots[code] = None
+        self.cmp_trails = {}
+
+        for cond, s in mapping.items():
             snap, trails = self._load_trails_and_snapshot(s["csv_path"])
             if snap is None or trails is None:
                 QtWidgets.QMessageBox.warning(self, "Comparativo", f"CSV vacío o inválido:\n{s['csv_path']}")
@@ -1855,9 +1855,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.cmp_trails[cond] = trails
 
         # mostrar todo
-        if hasattr(self, "chk_no"):  self.chk_no.setChecked(True)
-        if hasattr(self, "chk_occ"): self.chk_occ.setChecked(True)
-        if hasattr(self, "chk_ce"):  self.chk_ce.setChecked(True)
+        for code, chk in self.cmp_checks.items():
+            chk.setChecked(code in mapping)
 
         self.render_comparative()
         self.tabs.setCurrentWidget(self.tab_cmp)
@@ -2023,7 +2022,7 @@ class MainWindow(QtWidgets.QMainWindow):
         xs, ys = self.segment_for_angle(torsion_deg, length=40.0)
         self.line_t_live.setData(xs, ys)
 
-        for cond, line in [("NO", self.line_t_no), ("OCC", self.line_t_occ), ("CE", self.line_t_ce)]:
+        for cond, line in self.line_t_by_cond.items():
             snap = self.snapshots.get(cond)
             if snap:
                 xs2, ys2 = self.segment_for_angle(snap["torsion_deg"], length=40.0)
@@ -2096,12 +2095,12 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         # limpiar selección comparativo/replay si apuntaban a esto
-        for k in ["NO", "OCC", "CE"]:
+        for k in CONDITION_CODES:
             snap = self.snapshots.get(k)
             if snap and snap.get("session_name") == item.text():
                 self.snapshots[k] = None
         if hasattr(self, "cmp_trails"):
-            for k in ["NO", "OCC", "CE"]:
+            for k in CONDITION_CODES:
                 if self.cmp_trails.get(k):
                     # no sabemos si era esa sesión; lo más seguro es vaciar y que vuelvan a comparar
                     self.cmp_trails.pop(k, None)
