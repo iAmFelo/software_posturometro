@@ -123,10 +123,11 @@ def age_years(dob: date) -> int | None:
         years -= 1
     return years
 
-def kap_color(pct: float):
-    if pct > KAP_THRESH_HIGH:
+def kap_color(pct: float, key: str | None = None):
+    low, high = KAP_THRESHOLDS_BY_POINT.get(key, (KAP_THRESH_LOW, KAP_THRESH_HIGH))
+    if pct > high:
         return (220, 50, 50)     # rojo
-    if pct >= KAP_THRESH_LOW:
+    if pct >= low:
         return (240, 200, 0)     # amarillo
     return (60, 200, 90)         # verde
 
@@ -1224,7 +1225,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for i, key in enumerate(keys):
             x, y = self.kap_pos[key]
             pct = vals[i]
-            r, g, b = kap_color(pct)
+            r, g, b = kap_color(pct, key)
             self.kap_items[i].setData([x], [y])
             self.kap_items[i].setBrush(pg.mkBrush(r, g, b))
             self.kap_items[i].setPen(pg.mkPen("w"))
@@ -1381,7 +1382,7 @@ class MainWindow(QtWidgets.QMainWindow):
             for k in keys:
                 x, y = pos[k]
                 pct = snap[k]
-                r, g, b = kap_color(pct)
+                r, g, b = kap_color(pct, k)
                 sc = pg.ScatterPlotItem(size=18, brush=pg.mkBrush(r, g, b), pen=pg.mkPen("w"))
                 sc.setData([x], [y])
                 self.plot_cmp.addItem(sc)
