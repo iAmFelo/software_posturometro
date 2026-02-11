@@ -63,8 +63,15 @@ KAP_BASELINE_BY_POINT = {
 }
 
 # Umbrales de score por desvío relativo contra baseline (ajustables)
-KAP_SCORE_GREEN_MAX = 0.90
-KAP_SCORE_YELLOW_MAX = 1.10
+# Regla general (TOP/HEEL): verde < 0.85, amarillo 0.85-1.15, rojo > 1.15
+KAP_SCORE_GREEN_MAX = 0.85
+KAP_SCORE_RED_MIN = 1.15
+
+# SIDE suele ser más variable: umbrales más tolerantes
+KAP_SCORE_BOUNDS_BY_POINT = {
+    "L_lat": (0.75, 1.25),
+    "R_lat": (0.75, 1.25),
+}
 
 # Mostrar score (pct/base) además del porcentaje en cada punto Kapandji
 SHOW_KAP_SCORE = False
@@ -147,11 +154,12 @@ def kap_color_by_point(key: str, pct: float):
     if base <= 1e-9:
         return KAP_COLOR_NEUTRAL
     score = pct / base
-    if score < KAP_SCORE_GREEN_MAX:
+    green_max, red_min = KAP_SCORE_BOUNDS_BY_POINT.get(key, (KAP_SCORE_GREEN_MAX, KAP_SCORE_RED_MIN))
+    if score < green_max:
         return KAP_COLOR_GREEN
-    if score < KAP_SCORE_YELLOW_MAX:
-        return KAP_COLOR_YELLOW
-    return KAP_COLOR_RED
+    if score > red_min:
+        return KAP_COLOR_RED
+    return KAP_COLOR_YELLOW
 
 def kap_point_label(key: str, pct: float):
     if not SHOW_KAP_SCORE:
