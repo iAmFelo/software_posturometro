@@ -48,8 +48,6 @@ COP_DOT_SIZE_G = 16
 COP_DOT_SIZE_F = 14
 KAP_DOT_SIZE = 22
 
-# Umbral de neutralidad para flecha de balance (diferencia en % L/R)
-BALANCE_NEUTRAL_DELTA = 0.5
 
 # Umbral de carga total para considerar "sin apoyo" en Kapandji
 KAP_NO_SUPPORT_PT = 1.0
@@ -1222,31 +1220,29 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---------- Kapandji / Torsión helpers ----------
     def compute_kapandji_percents(self, p0, p1, p2, p3, p4, p5):
-        # Orden REAL de tu Arduino:
-        # Izq: p0=ARRIBA (0x27), p1=LATERAL (0x28), p2=ABAJO (0x29)
-        # Der: p3=ABAJO (0x30),  p4=LATERAL (0x31), p5=ARRIBA (0x32)
+        # Mapeo funcional Kapandji (TOP/SIDE/HEEL):
+        # Izq: TOP=p0, SIDE=p1, HEEL=p2
+        # Der: TOP=p5, SIDE=p4, HEEL=p3
+        # TOP   -> medial anterior (1° metatarsiano) baseline 2/6
+        # SIDE  -> lateral anterior (5° metatarsiano) baseline 1/6
+        # HEEL  -> posterior calcáneo (talón) baseline 3/6
 
-        # Para Kapandji con 3 sensores por pie:
-        # - Forefoot (antepie/metatarsos) ~ sensor ARRIBA
-        # - Lateral (borde externo) ~ sensor LATERAL
-        # - Heel (talon/retropie) ~ sensor ABAJO
-
-        L_forefoot = p0
-        L_lateral = p1
+        L_top = p0
+        L_side = p1
         L_heel = p2
 
+        R_top = p5
+        R_side = p4
         R_heel = p3
-        R_lateral = p4
-        R_forefoot = p5
 
-        def perc(a, b, c):
-            s = a + b + c
+        def perc(top, side, heel):
+            s = top + side + heel
             if s <= 0:
                 return (0.0, 0.0, 0.0)
-            return (100.0 * a / s, 100.0 * b / s, 100.0 * c / s)
+            return (100.0 * top / s, 100.0 * side / s, 100.0 * heel / s)
 
-        kapL = perc(L_forefoot, L_lateral, L_heel)
-        kapR = perc(R_forefoot, R_lateral, R_heel)
+        kapL = perc(L_top, L_side, L_heel)
+        kapR = perc(R_top, R_side, R_heel)
         return kapL, kapR
 
 
@@ -1397,13 +1393,12 @@ class MainWindow(QtWidgets.QMainWindow):
             left_pct = (100 * PL / total) if total > 0 else 0
             right_pct = (100 * PR / total) if total > 0 else 0
 
-            delta_lr = right_pct - left_pct
-            if abs(delta_lr) <= BALANCE_NEUTRAL_DELTA:
-                arrow = "↔"
+            if PL > PR:
+                arrow = "←"
             elif PR > PL:
                 arrow = "→"
             else:
-                arrow = "←"
+                arrow = "↔"
 
             arrow_html = f'<span style="font-size:16pt;">{arrow}</span>'
             line1 = f"L {left_pct:0.1f}% | R {right_pct:0.1f}% {arrow_html}"
@@ -1430,7 +1425,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 sc = pg.ScatterPlotItem(size=18, brush=pg.mkBrush(r, g, b), pen=pg.mkPen("w"))
                 sc.setData([x], [y])
                 self.plot_cmp.addItem(sc)
-                tt = pg.TextItem(kap_point_label(k, pct).replace("%", ""), anchor=(0.5, -0.6), color="w")
+                tt = pg.TextItem(kap_point_label(k, pct), anchor=(0.5, -0.6), color="w")
                 tt.setPos(x, y)
                 self.plot_cmp.addItem(tt)
 
