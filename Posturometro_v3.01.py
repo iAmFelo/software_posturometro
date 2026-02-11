@@ -48,12 +48,24 @@ COP_DOT_SIZE_G = 16
 COP_DOT_SIZE_F = 14
 KAP_DOT_SIZE = 22
 
-# Umbral en % para mostrar flecha de balance en comparativo
-BALANCE_ARROW_THRESHOLD = 2.0
+# Umbral de neutralidad para flecha de balance (diferencia en % L/R)
+BALANCE_NEUTRAL_DELTA = 0.5
 
-# Colores Kapandji según % dentro del pie
-KAP_THRESH_LOW = 20.0
-KAP_THRESH_HIGH = 30.0
+# Umbrales Kapandji por punto (verde/amarillo/rojo)
+# Formato: key -> (limite_amarillo, limite_rojo)
+# Nota: por geometría actual del programa, *med corresponde al punto anterior (antepié).
+KAP_POINT_THRESHOLDS = {
+    "L_med": (24.0, 30.0),  # anterior
+    "R_med": (24.0, 30.0),
+    "L_lat": (30.0, 38.0),  # medio-lateral
+    "R_lat": (30.0, 38.0),
+    "L_heel": (32.0, 40.0), # posterior (talón)
+    "R_heel": (32.0, 40.0),
+}
+
+KAP_COLOR_GREEN = (60, 200, 90)
+KAP_COLOR_YELLOW = (240, 200, 0)
+KAP_COLOR_RED = (220, 50, 50)
 
 # PAUSA también frena grabación
 PAUSE_STOPS_RECORDING_WRITE = True
@@ -123,13 +135,13 @@ def age_years(dob: date) -> int | None:
         years -= 1
     return years
 
-def kap_color(pct: float, key: str | None = None):
-    low, high = KAP_THRESHOLDS_BY_POINT.get(key, (KAP_THRESH_LOW, KAP_THRESH_HIGH))
-    if pct > high:
-        return (220, 50, 50)     # rojo
-    if pct >= low:
-        return (240, 200, 0)     # amarillo
-    return (60, 200, 90)         # verde
+def kap_color_by_point(key: str, pct: float):
+    yellow_thr, red_thr = KAP_POINT_THRESHOLDS.get(key, (30.0, 40.0))
+    if pct >= red_thr:
+        return KAP_COLOR_RED
+    if pct >= yellow_thr:
+        return KAP_COLOR_YELLOW
+    return KAP_COLOR_GREEN
 
 
 # ===================== DB =====================
@@ -1221,14 +1233,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # kapL/kapR: (forefoot, lateral, heel)
         vals = [kapL[0], kapL[1], kapL[2], kapR[0], kapR[1], kapR[2]]
         keys = ["L_med", "L_lat", "L_heel", "R_med", "R_lat", "R_heel"]
-        colors = {}
-        colors.update(kap_colors_by_rank(list(kapL), ["L_med", "L_lat", "L_heel"]))
-        colors.update(kap_colors_by_rank(list(kapR), ["R_med", "R_lat", "R_heel"]))
-
         for i, key in enumerate(keys):
             x, y = self.kap_pos[key]
             pct = vals[i]
-            r, g, b = kap_color(pct, key)
+            r, g, b = kap_color_by_point(key, pct)
             self.kap_items[i].setData([x], [y])
             self.kap_items[i].setBrush(pg.mkBrush(r, g, b))
             self.kap_items[i].setPen(pg.mkPen("w"))
@@ -1365,23 +1373,20 @@ class MainWindow(QtWidgets.QMainWindow):
             right_pct = (100 * PR / total) if total > 0 else 0
 
             delta_lr = right_pct - left_pct
-            if delta_lr > BALANCE_ARROW_THRESHOLD:
-                arrow = "→"
-            elif delta_lr < -BALANCE_ARROW_THRESHOLD:
-                arrow = "←"
-            else:
+            if abs(delta_lr) <= BALANCE_NEUTRAL_DELTA:
                 arrow = "↔"
+            elif PR > PL:
+                arrow = "→"
+            else:
+                arrow = "←"
 
-            info = f"L {left_pct:0.1f}% | R {right_pct:0.1f}% {arrow}\nOverload {overload:0.2f}"
-            tinfo = pg.TextItem(info, anchor=(0.5, 1.0), color="w")
+            arrow_html = f'<span style="font-size:16pt;">{arrow}</span>'
+            line1 = f"L {left_pct:0.1f}% | R {right_pct:0.1f}% {arrow_html}"
+            line2 = f"Overload {overload:0.2f}"
+            tinfo = pg.TextItem(anchor=(0.5, 1.0), color="w")
+            tinfo.setHtml(f"{line1}<br>{line2}")
             tinfo.setPos(cx, -15)
             self.plot_cmp.addItem(tinfo)
-
-            colors = {}
-            colors.update(kap_colors_by_rank([snap["L_med"], snap["L_lat"], snap["L_heel"]],
-                                             ["L_med", "L_lat", "L_heel"]))
-            colors.update(kap_colors_by_rank([snap["R_med"], snap["R_lat"], snap["R_heel"]],
-                                             ["R_med", "R_lat", "R_heel"]))
 
             pos = {
                 "L_med": (cx - 6, 18), "L_lat": (cx - 11, 10), "L_heel": (cx - 8, 0),
@@ -1391,7 +1396,7 @@ class MainWindow(QtWidgets.QMainWindow):
             for k in keys:
                 x, y = pos[k]
                 pct = snap[k]
-                r, g, b = kap_color(pct, k)
+                r, g, b = kap_color_by_point(k, pct)
                 sc = pg.ScatterPlotItem(size=18, brush=pg.mkBrush(r, g, b), pen=pg.mkPen("w"))
                 sc.setData([x], [y])
                 self.plot_cmp.addItem(sc)
