@@ -51,21 +51,30 @@ KAP_DOT_SIZE = 22
 # Umbral de neutralidad para flecha de balance (diferencia en % L/R)
 BALANCE_NEUTRAL_DELTA = 0.5
 
-# Umbrales Kapandji por punto (verde/amarillo/rojo)
-# Formato: key -> (limite_amarillo, limite_rojo)
-# Nota: por geometría actual del programa, *med corresponde al punto anterior (antepié).
-KAP_POINT_THRESHOLDS = {
-    "L_med": (24.0, 30.0),  # anterior
-    "R_med": (24.0, 30.0),
-    "L_lat": (30.0, 38.0),  # medio-lateral
-    "R_lat": (30.0, 38.0),
-    "L_heel": (32.0, 40.0), # posterior (talón)
-    "R_heel": (32.0, 40.0),
+# Umbral de carga total para considerar "sin apoyo" en Kapandji
+KAP_NO_SUPPORT_PT = 1.0
+
+# Baselines Kapandji esperados (2/6 - 1/6 - 3/6)
+KAP_BASELINE_BY_POINT = {
+    "L_med": 100.0 * (2.0 / 6.0),
+    "R_med": 100.0 * (2.0 / 6.0),
+    "L_lat": 100.0 * (1.0 / 6.0),
+    "R_lat": 100.0 * (1.0 / 6.0),
+    "L_heel": 100.0 * (3.0 / 6.0),
+    "R_heel": 100.0 * (3.0 / 6.0),
 }
+
+# Umbrales de score por desvío relativo contra baseline (ajustables)
+KAP_SCORE_GREEN_MAX = 0.90
+KAP_SCORE_YELLOW_MAX = 1.10
+
+# Mostrar score (pct/base) además del porcentaje en cada punto Kapandji
+SHOW_KAP_SCORE = False
 
 KAP_COLOR_GREEN = (60, 200, 90)
 KAP_COLOR_YELLOW = (240, 200, 0)
 KAP_COLOR_RED = (220, 50, 50)
+KAP_COLOR_NEUTRAL = (140, 140, 140)
 
 # PAUSA también frena grabación
 PAUSE_STOPS_RECORDING_WRITE = True
@@ -136,12 +145,24 @@ def age_years(dob: date) -> int | None:
     return years
 
 def kap_color_by_point(key: str, pct: float):
-    yellow_thr, red_thr = KAP_POINT_THRESHOLDS.get(key, (30.0, 40.0))
-    if pct >= red_thr:
-        return KAP_COLOR_RED
-    if pct >= yellow_thr:
+    base = KAP_BASELINE_BY_POINT.get(key, 0.0)
+    if base <= 1e-9:
+        return KAP_COLOR_NEUTRAL
+    score = pct / base
+    if score < KAP_SCORE_GREEN_MAX:
+        return KAP_COLOR_GREEN
+    if score < KAP_SCORE_YELLOW_MAX:
         return KAP_COLOR_YELLOW
-    return KAP_COLOR_GREEN
+    return KAP_COLOR_RED
+
+def kap_point_label(key: str, pct: float):
+    if not SHOW_KAP_SCORE:
+        return f"{pct:0.1f}%"
+    base = KAP_BASELINE_BY_POINT.get(key, 0.0)
+    if base <= 1e-9:
+        return f"{pct:0.1f}%"
+    score = pct / base
+    return f"{pct:0.1f}%\n({score:0.2f}x)"
 
 
 # ===================== DB =====================
@@ -1229,18 +1250,22 @@ class MainWindow(QtWidgets.QMainWindow):
         return kapL, kapR
 
 
-    def update_kapandji_overlay(self, kapL, kapR):
+    def update_kapandji_overlay(self, kapL, kapR, PT=0.0):
         # kapL/kapR: (forefoot, lateral, heel)
         vals = [kapL[0], kapL[1], kapL[2], kapR[0], kapR[1], kapR[2]]
         keys = ["L_med", "L_lat", "L_heel", "R_med", "R_lat", "R_heel"]
+        no_support = PT <= KAP_NO_SUPPORT_PT
         for i, key in enumerate(keys):
             x, y = self.kap_pos[key]
             pct = vals[i]
-            r, g, b = kap_color_by_point(key, pct)
+            if no_support:
+                r, g, b = KAP_COLOR_NEUTRAL
+            else:
+                r, g, b = kap_color_by_point(key, pct)
             self.kap_items[i].setData([x], [y])
             self.kap_items[i].setBrush(pg.mkBrush(r, g, b))
             self.kap_items[i].setPen(pg.mkPen("w"))
-            self.kap_text_items[i].setText(f"{pct:0.1f}%")
+            self.kap_text_items[i].setText(kap_point_label(key, pct))
             self.kap_text_items[i].setPos(x, y)
 
     def torsion_deg_from_feet(self, xl, yl, xr, yr):
@@ -1388,6 +1413,8 @@ class MainWindow(QtWidgets.QMainWindow):
             tinfo.setPos(cx, -15)
             self.plot_cmp.addItem(tinfo)
 
+            no_support = (PL + PR) <= KAP_NO_SUPPORT_PT
+
             pos = {
                 "L_med": (cx - 6, 18), "L_lat": (cx - 11, 10), "L_heel": (cx - 8, 0),
                 "R_med": (cx + 6, 18), "R_lat": (cx + 11, 10), "R_heel": (cx + 8, 0),
@@ -1396,11 +1423,14 @@ class MainWindow(QtWidgets.QMainWindow):
             for k in keys:
                 x, y = pos[k]
                 pct = snap[k]
-                r, g, b = kap_color_by_point(k, pct)
+                if no_support:
+                    r, g, b = KAP_COLOR_NEUTRAL
+                else:
+                    r, g, b = kap_color_by_point(k, pct)
                 sc = pg.ScatterPlotItem(size=18, brush=pg.mkBrush(r, g, b), pen=pg.mkPen("w"))
                 sc.setData([x], [y])
                 self.plot_cmp.addItem(sc)
-                tt = pg.TextItem(f"{pct:0.1f}", anchor=(0.5, -0.6), color="w")
+                tt = pg.TextItem(kap_point_label(k, pct).replace("%", ""), anchor=(0.5, -0.6), color="w")
                 tt.setPos(x, y)
                 self.plot_cmp.addItem(tt)
 
@@ -2032,7 +2062,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
         kapL, kapR = self.compute_kapandji_percents(p0,p1,p2,p3,p4,p5)
-        self.update_kapandji_overlay(kapL, kapR)
+        self.update_kapandji_overlay(kapL, kapR, PT=PL+PR)
 
         xs, ys = self.segment_for_angle(torsion_deg, length=40.0)
         self.line_t_live.setData(xs, ys)
