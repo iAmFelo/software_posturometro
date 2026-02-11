@@ -52,34 +52,20 @@ KAP_DOT_SIZE = 22
 # Umbral de carga total para considerar "sin apoyo" en Kapandji
 KAP_NO_SUPPORT_PT = 1.0
 
-# Pesos Kapandji esperados por zona (TOP, SIDE, HEEL)
+# Ventana para baseline dinámico por sensor (mediana móvil)
+KAP_BASELINE_WINDOW = 250
+
+# Baseline opcional de referencia Kapandji clásica (solo interpretativo)
 KAP_WEIGHTS = (2.0 / 6.0, 1.0 / 6.0, 3.0 / 6.0)
 
-# Baselines esperados en porcentaje (solo referencia clínica)
-KAP_BASELINE_BY_POINT = {
-    "L_med": 100.0 * KAP_WEIGHTS[0],
-    "R_med": 100.0 * KAP_WEIGHTS[0],
-    "L_lat": 100.0 * KAP_WEIGHTS[1],
-    "R_lat": 100.0 * KAP_WEIGHTS[1],
-    "L_heel": 100.0 * KAP_WEIGHTS[2],
-    "R_heel": 100.0 * KAP_WEIGHTS[2],
-}
+# Bandas clínicas por ratio sensor/baseline
+KAP_RATIO_GREEN_MAX = 0.75
+KAP_RATIO_RED_MIN = 1.35
 
-# Tolerancia clínica relativa para score vs esperado
-KAP_TOLERANCE = 0.20
+# Opcional: bounds específicos por punto; si no está la key usa los globales
+KAP_RATIO_BOUNDS_BY_POINT = {}
 
-# Umbrales de score por desvío relativo contra esperado
-# Regla general (TOP/HEEL): verde < 0.80, amarillo 0.80-1.20, rojo > 1.20
-KAP_SCORE_GREEN_MAX = 1.0 - KAP_TOLERANCE
-KAP_SCORE_RED_MIN = 1.0 + KAP_TOLERANCE
-
-# SIDE suele ser más variable: umbrales más tolerantes
-KAP_SCORE_BOUNDS_BY_POINT = {
-    "L_lat": (0.75, 1.25),
-    "R_lat": (0.75, 1.25),
-}
-
-# Mostrar ratio (real/esperado) además del valor real en cada punto Kapandji
+# Mostrar ratio (real/baseline) además del valor real en cada punto Kapandji
 SHOW_KAP_RATIO = False
 # Factor opcional de conversión a kg (None = no convertir, usar unidades crudas)
 KAP_SCALE_FACTOR = None
@@ -159,33 +145,28 @@ def age_years(dob: date) -> int | None:
         years -= 1
     return years
 
-def kap_expected_for_key(key: str, PL: float, PR: float):
-    if key.startswith("L_"):
-        foot_total = PL
-    else:
-        foot_total = PR
+def _median(vals):
+    if not vals:
+        return 0.0
+    sv = sorted(vals)
+    n = len(sv)
+    return sv[n // 2] if n % 2 == 1 else 0.5 * (sv[n // 2 - 1] + sv[n // 2])
 
-    if key.endswith("med"):
-        w = KAP_WEIGHTS[0]
-    elif key.endswith("lat"):
-        w = KAP_WEIGHTS[1]
-    else:
-        w = KAP_WEIGHTS[2]
-    return foot_total * w
+def _mean(vals):
+    return (sum(vals) / len(vals)) if vals else 0.0
 
-def kap_color_by_point(key: str, value: float, PL: float, PR: float):
-    expected = kap_expected_for_key(key, PL, PR)
-    if expected <= 1e-9:
+def kap_color_by_point(key: str, value: float, baseline: float):
+    if baseline <= 1e-9:
         return KAP_COLOR_NEUTRAL
-    ratio = value / expected
-    green_max, red_min = KAP_SCORE_BOUNDS_BY_POINT.get(key, (KAP_SCORE_GREEN_MAX, KAP_SCORE_RED_MIN))
+    ratio = value / baseline
+    green_max, red_min = KAP_RATIO_BOUNDS_BY_POINT.get(key, (KAP_RATIO_GREEN_MAX, KAP_RATIO_RED_MIN))
     if ratio < green_max:
         return KAP_COLOR_GREEN
     if ratio > red_min:
         return KAP_COLOR_RED
     return KAP_COLOR_YELLOW
 
-def kap_point_label(key: str, value: float, PL: float, PR: float):
+def kap_point_label(value: float, baseline: float):
     shown = value * KAP_SCALE_FACTOR if KAP_SCALE_FACTOR is not None else value
     if KAP_SCALE_FACTOR is not None:
         unit = "kg"
@@ -199,10 +180,9 @@ def kap_point_label(key: str, value: float, PL: float, PR: float):
 
     if not SHOW_KAP_RATIO:
         return label
-    expected = kap_expected_for_key(key, PL, PR)
-    if expected <= 1e-9:
+    if baseline <= 1e-9:
         return label
-    ratio = value / expected
+    ratio = value / baseline
     return f"{label}\n({ratio:0.2f}x)"
 
 
@@ -455,6 +435,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # Último frame
         self.last_processed = None
         self.recent = deque(maxlen=METRIC_WINDOW)
+
+        # Baseline dinámico Kapandji por sensor (mediana móvil)
+        self.kap_baseline_hist = {k: deque(maxlen=KAP_BASELINE_WINDOW) for k in ["L_med", "L_lat", "L_heel", "R_med", "R_lat", "R_heel"]}
+        self.kap_baseline_live = {k: 0.0 for k in self.kap_baseline_hist.keys()}
 
         # Capturas estabilizadas por condición
         self.snapshots = {code: None for code in CONDITION_CODES}
@@ -1254,6 +1238,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.metric_win = MetricWindow(maxlen=METRIC_WINDOW)
         self.recent.clear()
         self.last_processed = None
+        for k in self.kap_baseline_hist.keys():
+            self.kap_baseline_hist[k].clear()
+            self.kap_baseline_live[k] = 0.0
         self.statusBar().showMessage("Limpio (trayectorias y métricas).")
 
     def clear_comparative(self):
@@ -1263,6 +1250,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.render_comparative()
 
     # ---------- Kapandji / Torsión helpers ----------
+    def _update_kap_live_baseline(self, kapL, kapR):
+        vals = {
+            "L_med": kapL[0], "L_lat": kapL[1], "L_heel": kapL[2],
+            "R_med": kapR[0], "R_lat": kapR[1], "R_heel": kapR[2],
+        }
+        for k, v in vals.items():
+            self.kap_baseline_hist[k].append(v)
+            self.kap_baseline_live[k] = _median(self.kap_baseline_hist[k])
+
     def compute_kapandji_loads(self, p0, p1, p2, p3, p4, p5):
         # Mapeo funcional Kapandji (TOP/SIDE/HEEL):
         # Izq: TOP=p0, SIDE=p1, HEEL=p2
@@ -1285,24 +1281,24 @@ class MainWindow(QtWidgets.QMainWindow):
         return kapL, kapR
 
 
-    def update_kapandji_overlay(self, kapL, kapR, PT=0.0):
+    def update_kapandji_overlay(self, kapL, kapR, PT=0.0, baseline_map=None):
         # kapL/kapR: (forefoot, lateral, heel)
         vals = [kapL[0], kapL[1], kapL[2], kapR[0], kapR[1], kapR[2]]
         keys = ["L_med", "L_lat", "L_heel", "R_med", "R_lat", "R_heel"]
-        PL = kapL[0] + kapL[1] + kapL[2]
-        PR = kapR[0] + kapR[1] + kapR[2]
+        baseline_map = baseline_map or self.kap_baseline_live
         no_support = PT <= KAP_NO_SUPPORT_PT
         for i, key in enumerate(keys):
             x, y = self.kap_pos[key]
             value = vals[i]
+            baseline = baseline_map.get(key, 0.0)
             if no_support:
                 r, g, b = KAP_COLOR_NEUTRAL
             else:
-                r, g, b = kap_color_by_point(key, value, PL, PR)
+                r, g, b = kap_color_by_point(key, value, baseline)
             self.kap_items[i].setData([x], [y])
             self.kap_items[i].setBrush(pg.mkBrush(r, g, b))
             self.kap_items[i].setPen(pg.mkPen("w"))
-            self.kap_text_items[i].setText(kap_point_label(key, value, PL, PR))
+            self.kap_text_items[i].setText(kap_point_label(value, baseline))
             self.kap_text_items[i].setPos(x, y)
 
     def torsion_deg_from_feet(self, xl, yl, xr, yr):
@@ -1340,6 +1336,7 @@ class MainWindow(QtWidgets.QMainWindow):
             snap[k] = median([d[k] for d in recent])
         snap["cond"] = cond
         snap["ts"] = datetime.now().isoformat(timespec="seconds")
+        snap["kap_baseline"] = dict(self.kap_baseline_live)
         self.snapshots[cond] = snap
         self.statusBar().showMessage(f"Capturado {cond} (estabilizado).")
         self.render_comparative()
@@ -1450,6 +1447,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.plot_cmp.addItem(tinfo)
 
             no_support = (PL + PR) <= KAP_NO_SUPPORT_PT
+            baseline_map = snap.get("kap_baseline", {})
 
             pos = {
                 "L_med": (cx - 6, 18), "L_lat": (cx - 11, 10), "L_heel": (cx - 8, 0),
@@ -1459,14 +1457,15 @@ class MainWindow(QtWidgets.QMainWindow):
             for k in keys:
                 x, y = pos[k]
                 value = snap[k]
+                baseline = baseline_map.get(k, 0.0)
                 if no_support:
                     r, g, b = KAP_COLOR_NEUTRAL
                 else:
-                    r, g, b = kap_color_by_point(k, value, PL, PR)
+                    r, g, b = kap_color_by_point(k, value, baseline)
                 sc = pg.ScatterPlotItem(size=18, brush=pg.mkBrush(r, g, b), pen=pg.mkPen("w"))
                 sc.setData([x], [y])
                 self.plot_cmp.addItem(sc)
-                tt = pg.TextItem(kap_point_label(k, value, PL, PR), anchor=(0.5, -0.6), color="w")
+                tt = pg.TextItem(kap_point_label(value, baseline), anchor=(0.5, -0.6), color="w")
                 tt.setPos(x, y)
                 self.plot_cmp.addItem(tt)
 
@@ -1796,27 +1795,26 @@ class MainWindow(QtWidgets.QMainWindow):
                     if v is not None:
                         kap[k].append(v)
 
-        def med(vals):
-            if not vals:
-                return 0.0
-            s = sorted(vals);
-            n = len(s)
-            return s[n // 2] if n % 2 == 1 else 0.5 * (s[n // 2 - 1] + s[n // 2])
-
-        PLm = med(PLs);
-        PRm = med(PRs)
+        PLm = _median(PLs)
+        PRm = _median(PRs)
         total = PLm + PRm
         overload = abs(PLm - PRm) / total if total > 1e-9 else 0.0
 
+        kap_baseline = {
+            "L_med": _mean(kap["L_med"]), "L_lat": _mean(kap["L_lat"]), "L_heel": _mean(kap["L_heel"]),
+            "R_med": _mean(kap["R_med"]), "R_lat": _mean(kap["R_lat"]), "R_heel": _mean(kap["R_heel"]),
+        }
+
         snap = {
-            "xg": med([p[0] for p in G]) if G else 0.0,
-            "yg": med([p[1] for p in G]) if G else 0.0,
+            "xg": _median([p[0] for p in G]) if G else 0.0,
+            "yg": _median([p[1] for p in G]) if G else 0.0,
             "PL": PLm,
             "PR": PRm,
             "overload": overload,
-            "torsion_deg": med(tors),
-            "L_med": med(kap["L_med"]), "L_lat": med(kap["L_lat"]), "L_heel": med(kap["L_heel"]),
-            "R_med": med(kap["R_med"]), "R_lat": med(kap["R_lat"]), "R_heel": med(kap["R_heel"]),
+            "torsion_deg": _median(tors),
+            "L_med": _median(kap["L_med"]), "L_lat": _median(kap["L_lat"]), "L_heel": _median(kap["L_heel"]),
+            "R_med": _median(kap["R_med"]), "R_lat": _median(kap["R_lat"]), "R_heel": _median(kap["R_heel"]),
+            "kap_baseline": kap_baseline,
         }
 
         trails = {"L": L, "G": G, "R": R}
@@ -2101,7 +2099,8 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
         kapL, kapR = self.compute_kapandji_loads(p0,p1,p2,p3,p4,p5)
-        self.update_kapandji_overlay(kapL, kapR, PT=PL+PR)
+        self._update_kap_live_baseline(kapL, kapR)
+        self.update_kapandji_overlay(kapL, kapR, PT=PL+PR, baseline_map=self.kap_baseline_live)
 
         xs, ys = self.segment_for_angle(torsion_deg, length=40.0)
         self.line_t_live.setData(xs, ys)
