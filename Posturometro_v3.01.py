@@ -58,21 +58,23 @@ KAP_BASELINE_WINDOW = 250
 # Baseline opcional de referencia Kapandji clásica (solo interpretativo)
 KAP_WEIGHTS = (2.0 / 6.0, 1.0 / 6.0, 3.0 / 6.0)
 
-# Distribución esperada Kapandji por pie (arriba/medio/talón)
-KAP_EXPECTED_SHARE = {
-    "L_med": 2.0 / 6.0,
-    "R_med": 2.0 / 6.0,
-    "L_lat": 1.0 / 6.0,
-    "R_lat": 1.0 / 6.0,
-    "L_heel": 3.0 / 6.0,
-    "R_heel": 3.0 / 6.0,
+# Valores esperados por sensor (calibración cruda, ajustable por equipo)
+KAP_EXPECTED_RAW = {
+    "L_med": 3000.0,
+    "L_lat": 2000.0,
+    "L_heel": 4000.0,
+    "R_med": 3000.0,
+    "R_lat": 2000.0,
+    "R_heel": 4000.0,
 }
 
-# Tolerancias por desvío absoluto de share (configurables)
-KAP_TOL_GREEN = 0.07
-KAP_TOL_YELLOW = 0.15
+# Bandas clínicas por ratio (actual/esperado)
+KAP_RATIO_GREEN_MIN = 0.85
+KAP_RATIO_GREEN_MAX = 1.15
+KAP_RATIO_YELLOW_MIN = 0.70
+KAP_RATIO_YELLOW_MAX = 1.30
 
-# Mostrar ratio (debug) además del share/raw en cada punto Kapandji
+# Mostrar ratio (debug) además del valor raw en cada punto Kapandji
 SHOW_KAP_RATIO = False
 # Unidad para valor crudo mostrado (vacío = sin sufijo)
 KAP_VALUE_UNIT = ""
@@ -162,26 +164,38 @@ def _median(vals):
 def _mean(vals):
     return (sum(vals) / len(vals)) if vals else 0.0
 
-def kap_color_by_point(key: str, share: float):
-    expected = KAP_EXPECTED_SHARE.get(key, 0.0)
+def kap_ratio_for_point(key: str, value: float):
+    expected = KAP_EXPECTED_RAW.get(key, 0.0)
     if expected <= 1e-9:
+        return None
+    return value / expected
+
+def kap_color_by_point(key: str, value: float):
+    ratio = kap_ratio_for_point(key, value)
+    if ratio is None:
         return KAP_COLOR_NEUTRAL
-    dev = abs(share - expected)
-    if dev <= KAP_TOL_GREEN:
+    if KAP_RATIO_GREEN_MIN <= ratio <= KAP_RATIO_GREEN_MAX:
         return KAP_COLOR_GREEN
-    if dev <= KAP_TOL_YELLOW:
+    if (KAP_RATIO_YELLOW_MIN <= ratio < KAP_RATIO_GREEN_MIN) or (KAP_RATIO_GREEN_MAX < ratio <= KAP_RATIO_YELLOW_MAX):
         return KAP_COLOR_YELLOW
     return KAP_COLOR_RED
 
-def kap_point_label(key: str, value: float, share: float):
+def kap_symbol_by_ratio(ratio: float | None):
+    if ratio is None:
+        return "o"
+    if ratio > 1.0:
+        return "t1"
+    if ratio < 1.0:
+        return "t"
+    return "o"
+
+def kap_point_label(key: str, value: float):
     unit = KAP_VALUE_UNIT.strip()
     value_txt = f"{value:0.1f}{(' ' + unit) if unit else ''}"
-    share_txt = f"{share * 100.0:0.1f}%"
     if not SHOW_KAP_RATIO:
-        return f"{share_txt}\n{value_txt}"
-    expected = KAP_EXPECTED_SHARE.get(key, 2.0 / 6.0)
-    ratio = (share / expected) if expected > 1e-9 else 0.0
-    return f"{share_txt}\n{value_txt}\n({ratio:0.2f}x)"
+        return value_txt
+    ratio = kap_ratio_for_point(key, value)
+    return f"{value_txt}\n({ratio:0.2f}x)" if ratio is not None else value_txt
 
 
 
@@ -1345,16 +1359,17 @@ class MainWindow(QtWidgets.QMainWindow):
         for i, key in enumerate(keys):
             x, y = self.kap_pos[key]
             value = vals[i]
-            foot_sum = PL if key.startswith("L_") else PR
-            share = value / foot_sum if foot_sum > 1e-9 else 0.0
+            ratio = kap_ratio_for_point(key, value)
             if no_support:
                 r, g, b = KAP_COLOR_NEUTRAL
+                symbol = "o"
             else:
-                r, g, b = kap_color_by_point(key, share)
-            self.kap_items[i].setData([x], [y])
+                r, g, b = kap_color_by_point(key, value)
+                symbol = kap_symbol_by_ratio(ratio)
+            self.kap_items[i].setData([x], [y], symbol=symbol)
             self.kap_items[i].setBrush(pg.mkBrush(r, g, b))
             self.kap_items[i].setPen(pg.mkPen("w"))
-            self.kap_text_items[i].setText(kap_point_label(key, value, share))
+            self.kap_text_items[i].setText(kap_point_label(key, value))
             self.kap_text_items[i].setPos(x, y)
 
     def torsion_deg_from_feet(self, xl, yl, xr, yr):
@@ -1517,16 +1532,17 @@ class MainWindow(QtWidgets.QMainWindow):
             for k in keys:
                 x, y = pos[k]
                 value = snap[k]
-                foot_sum = sumL if k.startswith("L_") else sumR
-                share = value / foot_sum if foot_sum > 1e-9 else 0.0
+                ratio = kap_ratio_for_point(k, value)
                 if no_support:
                     r, g, b = KAP_COLOR_NEUTRAL
+                    symbol = "o"
                 else:
-                    r, g, b = kap_color_by_point(k, share)
-                sc = pg.ScatterPlotItem(size=18, symbol=self._kap_symbol_for_key(k), brush=pg.mkBrush(r, g, b), pen=pg.mkPen("w"))
+                    r, g, b = kap_color_by_point(k, value)
+                    symbol = kap_symbol_by_ratio(ratio)
+                sc = pg.ScatterPlotItem(size=18, symbol=symbol, brush=pg.mkBrush(r, g, b), pen=pg.mkPen("w"))
                 sc.setData([x], [y])
                 self.plot_cmp.addItem(sc)
-                tt = pg.TextItem(kap_point_label(k, value, share), anchor=(0.5, -0.6), color="w")
+                tt = pg.TextItem(kap_point_label(k, value), anchor=(0.5, -0.6), color="w")
                 tt.setPos(x, y)
                 self.plot_cmp.addItem(tt)
 
