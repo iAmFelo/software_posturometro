@@ -1221,6 +1221,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # kapL/kapR: (forefoot, lateral, heel)
         vals = [kapL[0], kapL[1], kapL[2], kapR[0], kapR[1], kapR[2]]
         keys = ["L_med", "L_lat", "L_heel", "R_med", "R_lat", "R_heel"]
+        colors = {}
+        colors.update(kap_colors_by_rank(list(kapL), ["L_med", "L_lat", "L_heel"]))
+        colors.update(kap_colors_by_rank(list(kapR), ["R_med", "R_lat", "R_heel"]))
 
         for i, key in enumerate(keys):
             x, y = self.kap_pos[key]
@@ -1373,6 +1376,12 @@ class MainWindow(QtWidgets.QMainWindow):
             tinfo = pg.TextItem(info, anchor=(0.5, 1.0), color="w")
             tinfo.setPos(cx, -15)
             self.plot_cmp.addItem(tinfo)
+
+            colors = {}
+            colors.update(kap_colors_by_rank([snap["L_med"], snap["L_lat"], snap["L_heel"]],
+                                             ["L_med", "L_lat", "L_heel"]))
+            colors.update(kap_colors_by_rank([snap["R_med"], snap["R_lat"], snap["R_heel"]],
+                                             ["R_med", "R_lat", "R_heel"]))
 
             pos = {
                 "L_med": (cx - 6, 18), "L_lat": (cx - 11, 10), "L_heel": (cx - 8, 0),
