@@ -52,20 +52,26 @@ KAP_DOT_SIZE = 22
 # Umbral de carga total para considerar "sin apoyo" en Kapandji
 KAP_NO_SUPPORT_PT = 1.0
 
-# Baselines Kapandji esperados (2/6 - 1/6 - 3/6)
+# Pesos Kapandji esperados por zona (TOP, SIDE, HEEL)
+KAP_WEIGHTS = (2.0 / 6.0, 1.0 / 6.0, 3.0 / 6.0)
+
+# Baselines esperados en porcentaje (solo referencia clínica)
 KAP_BASELINE_BY_POINT = {
-    "L_med": 100.0 * (2.0 / 6.0),
-    "R_med": 100.0 * (2.0 / 6.0),
-    "L_lat": 100.0 * (1.0 / 6.0),
-    "R_lat": 100.0 * (1.0 / 6.0),
-    "L_heel": 100.0 * (3.0 / 6.0),
-    "R_heel": 100.0 * (3.0 / 6.0),
+    "L_med": 100.0 * KAP_WEIGHTS[0],
+    "R_med": 100.0 * KAP_WEIGHTS[0],
+    "L_lat": 100.0 * KAP_WEIGHTS[1],
+    "R_lat": 100.0 * KAP_WEIGHTS[1],
+    "L_heel": 100.0 * KAP_WEIGHTS[2],
+    "R_heel": 100.0 * KAP_WEIGHTS[2],
 }
 
-# Umbrales de score por desvío relativo contra baseline (ajustables)
-# Regla general (TOP/HEEL): verde < 0.85, amarillo 0.85-1.15, rojo > 1.15
-KAP_SCORE_GREEN_MAX = 0.85
-KAP_SCORE_RED_MIN = 1.15
+# Tolerancia clínica relativa para score vs esperado
+KAP_TOLERANCE = 0.20
+
+# Umbrales de score por desvío relativo contra esperado
+# Regla general (TOP/HEEL): verde < 0.80, amarillo 0.80-1.20, rojo > 1.20
+KAP_SCORE_GREEN_MAX = 1.0 - KAP_TOLERANCE
+KAP_SCORE_RED_MIN = 1.0 + KAP_TOLERANCE
 
 # SIDE suele ser más variable: umbrales más tolerantes
 KAP_SCORE_BOUNDS_BY_POINT = {
@@ -73,8 +79,12 @@ KAP_SCORE_BOUNDS_BY_POINT = {
     "R_lat": (0.75, 1.25),
 }
 
-# Mostrar score (pct/base) además del porcentaje en cada punto Kapandji
-SHOW_KAP_SCORE = False
+# Mostrar ratio (real/esperado) además del valor real en cada punto Kapandji
+SHOW_KAP_RATIO = False
+# Factor opcional de conversión a kg (None = no convertir, usar unidades crudas)
+KAP_SCALE_FACTOR = None
+# Unidad a mostrar para valor crudo ("u", "counts" o "")
+KAP_VALUE_UNIT = "u"
 
 KAP_COLOR_GREEN = (60, 200, 90)
 KAP_COLOR_YELLOW = (240, 200, 0)
@@ -149,26 +159,52 @@ def age_years(dob: date) -> int | None:
         years -= 1
     return years
 
-def kap_color_by_point(key: str, pct: float):
-    base = KAP_BASELINE_BY_POINT.get(key, 0.0)
-    if base <= 1e-9:
+def kap_expected_for_key(key: str, PL: float, PR: float):
+    if key.startswith("L_"):
+        foot_total = PL
+    else:
+        foot_total = PR
+
+    if key.endswith("med"):
+        w = KAP_WEIGHTS[0]
+    elif key.endswith("lat"):
+        w = KAP_WEIGHTS[1]
+    else:
+        w = KAP_WEIGHTS[2]
+    return foot_total * w
+
+def kap_color_by_point(key: str, value: float, PL: float, PR: float):
+    expected = kap_expected_for_key(key, PL, PR)
+    if expected <= 1e-9:
         return KAP_COLOR_NEUTRAL
-    score = pct / base
+    ratio = value / expected
     green_max, red_min = KAP_SCORE_BOUNDS_BY_POINT.get(key, (KAP_SCORE_GREEN_MAX, KAP_SCORE_RED_MIN))
-    if score < green_max:
+    if ratio < green_max:
         return KAP_COLOR_GREEN
-    if score > red_min:
+    if ratio > red_min:
         return KAP_COLOR_RED
     return KAP_COLOR_YELLOW
 
-def kap_point_label(key: str, pct: float):
-    if not SHOW_KAP_SCORE:
-        return f"{pct:0.1f}%"
-    base = KAP_BASELINE_BY_POINT.get(key, 0.0)
-    if base <= 1e-9:
-        return f"{pct:0.1f}%"
-    score = pct / base
-    return f"{pct:0.1f}%\n({score:0.2f}x)"
+def kap_point_label(key: str, value: float, PL: float, PR: float):
+    shown = value * KAP_SCALE_FACTOR if KAP_SCALE_FACTOR is not None else value
+    if KAP_SCALE_FACTOR is not None:
+        unit = "kg"
+    else:
+        unit = KAP_VALUE_UNIT.strip()
+
+    if unit:
+        label = f"{shown:0.1f} {unit}"
+    else:
+        label = f"{shown:0.1f}"
+
+    if not SHOW_KAP_RATIO:
+        return label
+    expected = kap_expected_for_key(key, PL, PR)
+    if expected <= 1e-9:
+        return label
+    ratio = value / expected
+    return f"{label}\n({ratio:0.2f}x)"
+
 
 
 # ===================== DB =====================
@@ -1227,7 +1263,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.render_comparative()
 
     # ---------- Kapandji / Torsión helpers ----------
-    def compute_kapandji_percents(self, p0, p1, p2, p3, p4, p5):
+    def compute_kapandji_loads(self, p0, p1, p2, p3, p4, p5):
         # Mapeo funcional Kapandji (TOP/SIDE/HEEL):
         # Izq: TOP=p0, SIDE=p1, HEEL=p2
         # Der: TOP=p5, SIDE=p4, HEEL=p3
@@ -1243,14 +1279,9 @@ class MainWindow(QtWidgets.QMainWindow):
         R_side = p4
         R_heel = p3
 
-        def perc(top, side, heel):
-            s = top + side + heel
-            if s <= 0:
-                return (0.0, 0.0, 0.0)
-            return (100.0 * top / s, 100.0 * side / s, 100.0 * heel / s)
-
-        kapL = perc(L_top, L_side, L_heel)
-        kapR = perc(R_top, R_side, R_heel)
+        # devolvemos cargas absolutas por zona (unidades crudas calibradas)
+        kapL = (L_top, L_side, L_heel)
+        kapR = (R_top, R_side, R_heel)
         return kapL, kapR
 
 
@@ -1258,18 +1289,20 @@ class MainWindow(QtWidgets.QMainWindow):
         # kapL/kapR: (forefoot, lateral, heel)
         vals = [kapL[0], kapL[1], kapL[2], kapR[0], kapR[1], kapR[2]]
         keys = ["L_med", "L_lat", "L_heel", "R_med", "R_lat", "R_heel"]
+        PL = kapL[0] + kapL[1] + kapL[2]
+        PR = kapR[0] + kapR[1] + kapR[2]
         no_support = PT <= KAP_NO_SUPPORT_PT
         for i, key in enumerate(keys):
             x, y = self.kap_pos[key]
-            pct = vals[i]
+            value = vals[i]
             if no_support:
                 r, g, b = KAP_COLOR_NEUTRAL
             else:
-                r, g, b = kap_color_by_point(key, pct)
+                r, g, b = kap_color_by_point(key, value, PL, PR)
             self.kap_items[i].setData([x], [y])
             self.kap_items[i].setBrush(pg.mkBrush(r, g, b))
             self.kap_items[i].setPen(pg.mkPen("w"))
-            self.kap_text_items[i].setText(kap_point_label(key, pct))
+            self.kap_text_items[i].setText(kap_point_label(key, value, PL, PR))
             self.kap_text_items[i].setPos(x, y)
 
     def torsion_deg_from_feet(self, xl, yl, xr, yr):
@@ -1425,15 +1458,15 @@ class MainWindow(QtWidgets.QMainWindow):
             keys = ["L_med", "L_lat", "L_heel", "R_med", "R_lat", "R_heel"]
             for k in keys:
                 x, y = pos[k]
-                pct = snap[k]
+                value = snap[k]
                 if no_support:
                     r, g, b = KAP_COLOR_NEUTRAL
                 else:
-                    r, g, b = kap_color_by_point(k, pct)
+                    r, g, b = kap_color_by_point(k, value, PL, PR)
                 sc = pg.ScatterPlotItem(size=18, brush=pg.mkBrush(r, g, b), pen=pg.mkPen("w"))
                 sc.setData([x], [y])
                 self.plot_cmp.addItem(sc)
-                tt = pg.TextItem(kap_point_label(k, pct), anchor=(0.5, -0.6), color="w")
+                tt = pg.TextItem(kap_point_label(k, value, PL, PR), anchor=(0.5, -0.6), color="w")
                 tt.setPos(x, y)
                 self.plot_cmp.addItem(tt)
 
@@ -1744,21 +1777,24 @@ class MainWindow(QtWidgets.QMainWindow):
             if tor is not None:
                 tors.append(tor)
 
+            has_raw_kap = False
             if None not in (p0, p1, p2, p3, p4, p5):
-                kapL, kapR = self.compute_kapandji_percents(p0, p1, p2, p3, p4, p5)
-                # kapL y kapR deberían ser [med, lat, heel] en %
+                kapL, kapR = self.compute_kapandji_loads(p0, p1, p2, p3, p4, p5)
+                # kapL y kapR son cargas absolutas [med, lat, heel]
                 kap["L_med"].append(kapL[0]);
                 kap["L_lat"].append(kapL[1]);
                 kap["L_heel"].append(kapL[2])
                 kap["R_med"].append(kapR[0]);
                 kap["R_lat"].append(kapR[1]);
                 kap["R_heel"].append(kapR[2])
+                has_raw_kap = True
 
-            # Kapandji si existe en CSV (si no existe, queda vacío y luego cae a 0)
-            for k in kap.keys():
-                v = fget(rr, [k])
-                if v is not None:
-                    kap[k].append(v)
+            # Fallback para CSV viejos sin p0..p5: tomar columnas Kapandji si existen
+            if not has_raw_kap:
+                for k in kap.keys():
+                    v = fget(rr, [k])
+                    if v is not None:
+                        kap[k].append(v)
 
         def med(vals):
             if not vals:
@@ -2064,7 +2100,7 @@ class MainWindow(QtWidgets.QMainWindow):
             f"Sway: {m.sway_path:7.2f} cm | Vel: {m.mean_speed:6.2f} cm/s | RMSx: {m.rms_x:5.2f} | RMSy: {m.rms_y:5.2f} | Torsión: {torsion_deg:+.2f}°"
         )
 
-        kapL, kapR = self.compute_kapandji_percents(p0,p1,p2,p3,p4,p5)
+        kapL, kapR = self.compute_kapandji_loads(p0,p1,p2,p3,p4,p5)
         self.update_kapandji_overlay(kapL, kapR, PT=PL+PR)
 
         xs, ys = self.segment_for_angle(torsion_deg, length=40.0)
