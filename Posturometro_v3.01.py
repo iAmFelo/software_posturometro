@@ -71,6 +71,8 @@ SHOW_KAP_RATIO = False
 KAP_SCALE_FACTOR = None
 # Unidad a mostrar para valor crudo ("u", "counts" o "")
 KAP_VALUE_UNIT = "u"
+KAP_CALIBRATION_SECONDS = 3.0
+KAP_CALIBRATION_MIN_SAMPLES = 20
 
 KAP_COLOR_GREEN = (60, 200, 90)
 KAP_COLOR_YELLOW = (240, 200, 0)
@@ -166,9 +168,9 @@ def kap_color_by_point(key: str, value: float, baseline: float):
         return KAP_COLOR_RED
     return KAP_COLOR_YELLOW
 
-def kap_point_label(value: float, baseline: float):
-    shown = value * KAP_SCALE_FACTOR if KAP_SCALE_FACTOR is not None else value
-    if KAP_SCALE_FACTOR is not None:
+def kap_point_label(value: float, baseline: float, scale_factor: float | None = None):
+    shown = value * scale_factor if scale_factor is not None else value
+    if scale_factor is not None:
         unit = "kg"
     else:
         unit = KAP_VALUE_UNIT.strip()
@@ -323,6 +325,14 @@ class NewSessionDialog(QtWidgets.QDialog):
         self.chk_clear.setChecked(True)
         layout.addRow("", self.chk_clear)
 
+        self.edit_weight = QtWidgets.QDoubleSpinBox()
+        self.edit_weight.setRange(1.0, 300.0)
+        self.edit_weight.setDecimals(1)
+        self.edit_weight.setSingleStep(0.5)
+        self.edit_weight.setValue(70.0)
+        self.edit_weight.setSuffix(" kg")
+        layout.addRow("Peso (kg):", self.edit_weight)
+
         btns = QtWidgets.QHBoxLayout()
         ok = QtWidgets.QPushButton("Iniciar")
         cancel = QtWidgets.QPushButton("Cancelar")
@@ -338,6 +348,8 @@ class NewSessionDialog(QtWidgets.QDialog):
         return self.combo_cond.currentText()
     def clear_trails(self):
         return self.chk_clear.isChecked()
+    def weight_kg(self):
+        return float(self.edit_weight.value())
 
 
 
@@ -418,6 +430,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.current_session_dir = None
         self.csv_file = None
         self.csv_writer = None
+        self.session_weight_kg = None
+        self.kap_scale_to_kg = None
+        self.kap_calib_start_t = None
+        self.kap_calib_samples = deque(maxlen=300)
 
         # EMA
         self.ema_xg = EMA(EMA_ALPHA); self.ema_yg = EMA(EMA_ALPHA)
@@ -906,6 +922,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.tabs.addTab(self.tab_rep, "Replay")
 
+    def _kap_symbol_for_key(self, key: str):
+        # Triángulos orientados aproximados al centro del pie
+        if key.endswith("heel"):
+            return "t"
+        if key.endswith("lat"):
+            return "t1"
+        return "t3"
+
     def _init_kapandji_overlay(self):
         self.kap_pos = {
             "L_med": (-5.5,  7.0),
@@ -915,10 +939,18 @@ class MainWindow(QtWidgets.QMainWindow):
             "R_lat": (10.5,  2.0),
             "R_heel": ( 7.5, -8.0),
         }
-        for _ in range(6):
-            it = pg.ScatterPlotItem(size=KAP_DOT_SIZE, brush=pg.mkBrush(60, 200, 90), pen=pg.mkPen("w"))
+        kap_keys = ["L_med", "L_lat", "L_heel", "R_med", "R_lat", "R_heel"]
+        for k in kap_keys:
+            it = pg.ScatterPlotItem(size=KAP_DOT_SIZE, symbol=self._kap_symbol_for_key(k),
+                                    brush=pg.mkBrush(60, 200, 90), pen=pg.mkPen("w"))
             self.plot_live.addItem(it)
             self.kap_items.append(it)
+
+        # Siluetas simples de pies en fondo (estilo referencia)
+        for cx in (-8.0, 8.0):
+            xs = [cx + 4.2 * math.cos(t) for t in [i * (2*math.pi/80) for i in range(81)]]
+            ys = [0.0 + 10.5 * math.sin(t) for t in [i * (2*math.pi/80) for i in range(81)]]
+            self.plot_live.plot(xs, ys, pen=pg.mkPen(90, 90, 90, width=1))
         for _ in range(6):
             ti = pg.TextItem("", anchor=(0.5, -0.6), color="w")
             self.plot_live.addItem(ti)
@@ -1158,6 +1190,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         folder = slugify(sess_name)
         self.session_condition = normalize_condition(dlg.condition())
+        self.session_weight_kg = dlg.weight_kg()
+        self.kap_scale_to_kg = None
+        self.kap_calib_start_t = time.time()
+        self.kap_calib_samples.clear()
 
         if dlg.clear_trails():
             self.clear_all()
@@ -1174,6 +1210,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.csv_writer.writerow([
             "timestamp",
             "p0", "p1", "p2", "p3", "p4", "p5",
+            "kg0", "kg1", "kg2", "kg3", "kg4", "kg5", "k_scale",
             "xg", "yg", "xl", "yl", "xr", "yr",
             "PL", "PR",
             "overload", "torsion_deg",
@@ -1187,6 +1224,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "dob": dob_iso,
             "condition": self.session_condition,
             "session_name": sess_name,
+            "weight_kg": self.session_weight_kg,
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "port": self.current_port,
             "baud": BAUD,
@@ -1202,7 +1240,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lbl_rec.setVisible(True)
         self.btn_stop.setEnabled(True)
         self.btn_new_session.setEnabled(False)
-        self.statusBar().showMessage(f"Grabando: {sess_name} ({self.session_condition})")
+        self.statusBar().showMessage(f"Grabando: {sess_name} ({self.session_condition}) | Peso {self.session_weight_kg:0.1f} kg")
 
         self.refresh_sessions()
 
@@ -1220,8 +1258,25 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.csv_file.close()
         except:
             pass
+        try:
+            if self.current_session_dir:
+                meta_path = os.path.join(self.current_session_dir, "meta.json")
+                if os.path.isfile(meta_path):
+                    with open(meta_path, "r", encoding="utf-8") as f:
+                        meta = json.load(f)
+                else:
+                    meta = {}
+                meta["kg_scale_factor"] = self.kap_scale_to_kg
+                with open(meta_path, "w", encoding="utf-8") as f:
+                    json.dump(meta, f, indent=2, ensure_ascii=False)
+        except:
+            pass
         self.csv_file = None
         self.csv_writer = None
+        self.session_weight_kg = None
+        self.kap_scale_to_kg = None
+        self.kap_calib_start_t = None
+        self.kap_calib_samples = deque(maxlen=300)
         self.current_session_dir = None
         self.statusBar().showMessage("Grabación detenida.")
 
@@ -1241,6 +1296,9 @@ class MainWindow(QtWidgets.QMainWindow):
         for k in self.kap_baseline_hist.keys():
             self.kap_baseline_hist[k].clear()
             self.kap_baseline_live[k] = 0.0
+        self.kap_scale_to_kg = None
+        self.kap_calib_start_t = None
+        self.kap_calib_samples.clear()
         self.statusBar().showMessage("Limpio (trayectorias y métricas).")
 
     def clear_comparative(self):
@@ -1298,7 +1356,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.kap_items[i].setData([x], [y])
             self.kap_items[i].setBrush(pg.mkBrush(r, g, b))
             self.kap_items[i].setPen(pg.mkPen("w"))
-            self.kap_text_items[i].setText(kap_point_label(value, baseline))
+            self.kap_text_items[i].setText(kap_point_label(value, baseline, self.kap_scale_to_kg))
             self.kap_text_items[i].setPos(x, y)
 
     def torsion_deg_from_feet(self, xl, yl, xr, yr):
@@ -1337,6 +1395,7 @@ class MainWindow(QtWidgets.QMainWindow):
         snap["cond"] = cond
         snap["ts"] = datetime.now().isoformat(timespec="seconds")
         snap["kap_baseline"] = dict(self.kap_baseline_live)
+        snap["kg_scale_factor"] = self.kap_scale_to_kg
         self.snapshots[cond] = snap
         self.statusBar().showMessage(f"Capturado {cond} (estabilizado).")
         self.render_comparative()
@@ -1462,10 +1521,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     r, g, b = KAP_COLOR_NEUTRAL
                 else:
                     r, g, b = kap_color_by_point(k, value, baseline)
-                sc = pg.ScatterPlotItem(size=18, brush=pg.mkBrush(r, g, b), pen=pg.mkPen("w"))
+                sc = pg.ScatterPlotItem(size=18, symbol=self._kap_symbol_for_key(k), brush=pg.mkBrush(r, g, b), pen=pg.mkPen("w"))
                 sc.setData([x], [y])
                 self.plot_cmp.addItem(sc)
-                tt = pg.TextItem(kap_point_label(value, baseline), anchor=(0.5, -0.6), color="w")
+                tt = pg.TextItem(kap_point_label(value, baseline, snap.get("kg_scale_factor")), anchor=(0.5, -0.6), color="w")
                 tt.setPos(x, y)
                 self.plot_cmp.addItem(tt)
 
@@ -1741,6 +1800,7 @@ class MainWindow(QtWidgets.QMainWindow):
         PRs = []
         tors = []
         kap = {"L_med": [], "L_lat": [], "L_heel": [], "R_med": [], "R_lat": [], "R_heel": []}
+        has_kg_cols = False
 
         for rr in rows:
             xg = fget(rr, ["xg", "xG", "xG_ema"]);
@@ -1752,6 +1812,7 @@ class MainWindow(QtWidgets.QMainWindow):
             PL = fget(rr, ["PL"]);
             PR = fget(rr, ["PR"])
             tor = fget(rr, ["torsion_deg", "torsion", "torsionAngle"])
+            kg0 = fget(rr, ["kg0"]); kg1 = fget(rr, ["kg1"]); kg2 = fget(rr, ["kg2"]); kg3 = fget(rr, ["kg3"]); kg4 = fget(rr, ["kg4"]); kg5 = fget(rr, ["kg5"])
             p0 = fget(rr, ["p0"]);
             p1 = fget(rr, ["p1"]);
             p2 = fget(rr, ["p2"])
@@ -1777,8 +1838,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 tors.append(tor)
 
             has_raw_kap = False
-            if None not in (p0, p1, p2, p3, p4, p5):
+            if None not in (kg0, kg1, kg2, kg3, kg4, kg5):
+                kapL, kapR = self.compute_kapandji_loads(kg0, kg1, kg2, kg3, kg4, kg5)
+                has_kg_cols = True
+            elif None not in (p0, p1, p2, p3, p4, p5):
                 kapL, kapR = self.compute_kapandji_loads(p0, p1, p2, p3, p4, p5)
+            else:
+                kapL = kapR = None
+
+            if kapL is not None and kapR is not None:
                 # kapL y kapR son cargas absolutas [med, lat, heel]
                 kap["L_med"].append(kapL[0]);
                 kap["L_lat"].append(kapL[1]);
@@ -1805,6 +1873,20 @@ class MainWindow(QtWidgets.QMainWindow):
             "R_med": _mean(kap["R_med"]), "R_lat": _mean(kap["R_lat"]), "R_heel": _mean(kap["R_heel"]),
         }
 
+        # intentar leer scale desde meta de la sesión
+        kg_scale_factor = None
+        try:
+            meta_path = os.path.join(os.path.dirname(csv_path), "meta.json")
+            if os.path.isfile(meta_path):
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                kg_scale_factor = meta.get("kg_scale_factor")
+        except:
+            kg_scale_factor = None
+
+        if kg_scale_factor is None and has_kg_cols:
+            kg_scale_factor = 1.0
+
         snap = {
             "xg": _median([p[0] for p in G]) if G else 0.0,
             "yg": _median([p[1] for p in G]) if G else 0.0,
@@ -1815,6 +1897,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "L_med": _median(kap["L_med"]), "L_lat": _median(kap["L_lat"]), "L_heel": _median(kap["L_heel"]),
             "R_med": _median(kap["R_med"]), "R_lat": _median(kap["R_lat"]), "R_heel": _median(kap["R_heel"]),
             "kap_baseline": kap_baseline,
+            "kg_scale_factor": kg_scale_factor,
         }
 
         trails = {"L": L, "G": G, "R": R}
@@ -2075,18 +2158,42 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dot_r.setData([xr],[yr])
 
         total = PL + PR
-        if total > 0:
-            left_pct = 100.0 * PL / total
-            right_pct = 100.0 * PR / total
-            overload = abs(PL - PR) / total
+        now_t = time.time()
+        if total > 0 and self.session_weight_kg and self.session_weight_kg > 0:
+            if self.kap_scale_to_kg is None and self.kap_calib_start_t is not None and (now_t - self.kap_calib_start_t) <= KAP_CALIBRATION_SECONDS:
+                self.kap_calib_samples.append(total)
+                if len(self.kap_calib_samples) >= KAP_CALIBRATION_MIN_SAMPLES:
+                    self.kap_scale_to_kg = self.session_weight_kg / max(1e-9, _median(self.kap_calib_samples))
+            if self.kap_scale_to_kg is None:
+                k_cur = self.session_weight_kg / max(1e-9, total)
+            else:
+                k_cur = self.kap_scale_to_kg
+        else:
+            k_cur = None
+
+        kg0 = p0 * k_cur if k_cur is not None else p0
+        kg1 = p1 * k_cur if k_cur is not None else p1
+        kg2 = p2 * k_cur if k_cur is not None else p2
+        kg3 = p3 * k_cur if k_cur is not None else p3
+        kg4 = p4 * k_cur if k_cur is not None else p4
+        kg5 = p5 * k_cur if k_cur is not None else p5
+        PLkg = kg0 + kg1 + kg2
+        PRkg = kg3 + kg4 + kg5
+        PTkg = PLkg + PRkg
+
+        if PTkg > 0:
+            left_pct = 100.0 * PLkg / PTkg
+            right_pct = 100.0 * PRkg / PTkg
+            overload = abs(PLkg - PRkg) / PTkg
+            arrow = "←" if PLkg > PRkg else ("→" if PRkg > PLkg else "↔")
             self.balance.setValue(int(round(right_pct)))
             self.lbl_weights.setText(
-                f"PL: {PL:.0f} | PR: {PR:.0f} | Izq: {left_pct:5.1f}% Der: {right_pct:5.1f}% | Overload: {overload:0.2f}"
+                f"Izquierda: {PLkg:5.1f} | Derecha: {PRkg:5.1f} | L {left_pct:5.1f}% R {right_pct:5.1f}% {arrow} | Sobrecarga: {overload:0.2f}"
             )
         else:
             overload = 0.0
             self.balance.setValue(50)
-            self.lbl_weights.setText("PL: --- | PR: --- | Izq: ---% Der: --- % | Overload: ---")
+            self.lbl_weights.setText("Izquierda: --- | Derecha: --- | L ---% R ---% | Sobrecarga: ---")
 
         t = time.time()
         self.metric_win.add(t, xg, yg)
@@ -2098,7 +2205,7 @@ class MainWindow(QtWidgets.QMainWindow):
             f"Sway: {m.sway_path:7.2f} cm | Vel: {m.mean_speed:6.2f} cm/s | RMSx: {m.rms_x:5.2f} | RMSy: {m.rms_y:5.2f} | Torsión: {torsion_deg:+.2f}°"
         )
 
-        kapL, kapR = self.compute_kapandji_loads(p0,p1,p2,p3,p4,p5)
+        kapL, kapR = self.compute_kapandji_loads(kg0,kg1,kg2,kg3,kg4,kg5)
         self._update_kap_live_baseline(kapL, kapR)
         self.update_kapandji_overlay(kapL, kapR, PT=PL+PR, baseline_map=self.kap_baseline_live)
 
@@ -2116,7 +2223,7 @@ class MainWindow(QtWidgets.QMainWindow):
         rec = {
             "t": t,
             "xg": xg, "yg": yg, "xl": xl, "yl": yl, "xr": xr, "yr": yr,
-            "PL": PL, "PR": PR,
+            "PL": PLkg, "PR": PRkg,
             "overload": overload,
             "torsion_deg": torsion_deg,
             "L_med": kapL[0], "L_lat": kapL[1], "L_heel": kapL[2],
@@ -2130,8 +2237,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.csv_writer.writerow([
                     t,
                     p0,p1,p2,p3,p4,p5,
+                    kg0,kg1,kg2,kg3,kg4,kg5, k_cur,
                     xg,yg,xl,yl,xr,yr,
-                    PL,PR,
+                    PLkg,PRkg,
                     overload, torsion_deg,
                     m.sway_path, m.mean_speed, m.rms_x, m.rms_y,
                     self.session_condition
