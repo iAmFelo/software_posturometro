@@ -59,18 +59,17 @@ KAP_BASELINE_WINDOW = 250
 KAP_WEIGHTS = (2.0 / 6.0, 1.0 / 6.0, 3.0 / 6.0)
 
 # Bandas clínicas por ratio sensor/baseline
-KAP_RATIO_GREEN_MAX = 0.75
-KAP_RATIO_RED_MIN = 1.35
-
-# Opcional: bounds específicos por punto; si no está la key usa los globales
-KAP_RATIO_BOUNDS_BY_POINT = {}
+KAP_RATIO_YELLOW_MIN = 0.70
+KAP_RATIO_GREEN_MIN = 0.85
+KAP_RATIO_GREEN_MAX = 1.15
+KAP_RATIO_YELLOW_MAX = 1.35
 
 # Mostrar ratio (real/baseline) además del valor real en cada punto Kapandji
 SHOW_KAP_RATIO = False
 # Factor opcional de conversión a kg (None = no convertir, usar unidades crudas)
 KAP_SCALE_FACTOR = None
 # Unidad a mostrar para valor crudo ("u", "counts" o "")
-KAP_VALUE_UNIT = "u"
+KAP_VALUE_UNIT = "kg_equiv"
 KAP_CALIBRATION_SECONDS = 3.0
 KAP_CALIBRATION_MIN_SAMPLES = 20
 
@@ -161,11 +160,10 @@ def kap_color_by_point(key: str, value: float, baseline: float):
     if baseline <= 1e-9:
         return KAP_COLOR_NEUTRAL
     ratio = value / baseline
-    green_max, red_min = KAP_RATIO_BOUNDS_BY_POINT.get(key, (KAP_RATIO_GREEN_MAX, KAP_RATIO_RED_MIN))
-    if ratio < green_max:
-        return KAP_COLOR_GREEN
-    if ratio > red_min:
+    if ratio < KAP_RATIO_YELLOW_MIN or ratio > KAP_RATIO_YELLOW_MAX:
         return KAP_COLOR_RED
+    if KAP_RATIO_GREEN_MIN <= ratio <= KAP_RATIO_GREEN_MAX:
+        return KAP_COLOR_GREEN
     return KAP_COLOR_YELLOW
 
 def kap_point_label(value: float, baseline: float, scale_factor: float | None = None):
@@ -1339,7 +1337,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return kapL, kapR
 
 
-    def update_kapandji_overlay(self, kapL, kapR, PT=0.0, baseline_map=None):
+    def update_kapandji_overlay(self, kapL, kapR, PT=0.0, baseline_map=None, scale_factor=None):
         # kapL/kapR: (forefoot, lateral, heel)
         vals = [kapL[0], kapL[1], kapL[2], kapR[0], kapR[1], kapR[2]]
         keys = ["L_med", "L_lat", "L_heel", "R_med", "R_lat", "R_heel"]
@@ -1356,7 +1354,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.kap_items[i].setData([x], [y])
             self.kap_items[i].setBrush(pg.mkBrush(r, g, b))
             self.kap_items[i].setPen(pg.mkPen("w"))
-            self.kap_text_items[i].setText(kap_point_label(value, baseline, self.kap_scale_to_kg))
+            self.kap_text_items[i].setText(kap_point_label(value, baseline, scale_factor))
             self.kap_text_items[i].setPos(x, y)
 
     def torsion_deg_from_feet(self, xl, yl, xr, yr):
@@ -1390,6 +1388,8 @@ class MainWindow(QtWidgets.QMainWindow):
         snap = {}
         for k in ["xg","yg","xl","yl","xr","yr","PL","PR","overload","torsion_deg"]:
             snap[k] = median([d[k] for d in recent])
+        if all("k_scale" in d for d in recent):
+            snap["kg_scale_factor"] = median([d["k_scale"] for d in recent if d.get("k_scale") is not None])
         for k in ["L_med","L_lat","L_heel","R_med","R_lat","R_heel"]:
             snap[k] = median([d[k] for d in recent])
         snap["cond"] = cond
@@ -1499,7 +1499,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
             arrow_html = f'<span style="font-size:16pt;">{arrow}</span>'
             line1 = f"L {left_pct:0.1f}% | R {right_pct:0.1f}% {arrow_html}"
-            line2 = f"Overload {overload:0.2f}"
+            line2 = f"Sobrecarga {abs(PL-PR):0.1f}"
             tinfo = pg.TextItem(anchor=(0.5, 1.0), color="w")
             tinfo.setHtml(f"{line1}<br>{line2}")
             tinfo.setPos(cx, -15)
@@ -2188,7 +2188,7 @@ class MainWindow(QtWidgets.QMainWindow):
             arrow = "←" if PLkg > PRkg else ("→" if PRkg > PLkg else "↔")
             self.balance.setValue(int(round(right_pct)))
             self.lbl_weights.setText(
-                f"Izquierda: {PLkg:5.1f} | Derecha: {PRkg:5.1f} | L {left_pct:5.1f}% R {right_pct:5.1f}% {arrow} | Sobrecarga: {overload:0.2f}"
+                f"Izquierda: {PLkg:5.1f} | Derecha: {PRkg:5.1f} | L {left_pct:5.1f}% R {right_pct:5.1f}% {arrow} | Sobrecarga: {abs(PLkg-PRkg):0.1f}"
             )
         else:
             overload = 0.0
@@ -2207,7 +2207,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         kapL, kapR = self.compute_kapandji_loads(kg0,kg1,kg2,kg3,kg4,kg5)
         self._update_kap_live_baseline(kapL, kapR)
-        self.update_kapandji_overlay(kapL, kapR, PT=PL+PR, baseline_map=self.kap_baseline_live)
+        self.update_kapandji_overlay(kapL, kapR, PT=PL+PR, baseline_map=self.kap_baseline_live, scale_factor=k_cur)
 
         xs, ys = self.segment_for_angle(torsion_deg, length=40.0)
         self.line_t_live.setData(xs, ys)
@@ -2228,6 +2228,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "torsion_deg": torsion_deg,
             "L_med": kapL[0], "L_lat": kapL[1], "L_heel": kapL[2],
             "R_med": kapR[0], "R_lat": kapR[1], "R_heel": kapR[2],
+            "k_scale": k_cur,
         }
         self.last_processed = rec
         self.recent.append(rec)
