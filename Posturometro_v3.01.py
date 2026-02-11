@@ -58,18 +58,24 @@ KAP_BASELINE_WINDOW = 250
 # Baseline opcional de referencia Kapandji clásica (solo interpretativo)
 KAP_WEIGHTS = (2.0 / 6.0, 1.0 / 6.0, 3.0 / 6.0)
 
-# Bandas clínicas por ratio sensor/baseline
-KAP_RATIO_YELLOW_MIN = 0.70
-KAP_RATIO_GREEN_MIN = 0.85
-KAP_RATIO_GREEN_MAX = 1.15
-KAP_RATIO_YELLOW_MAX = 1.35
+# Distribución esperada Kapandji por pie (arriba/medio/talón)
+KAP_EXPECTED_SHARE = {
+    "L_med": 2.0 / 6.0,
+    "R_med": 2.0 / 6.0,
+    "L_lat": 1.0 / 6.0,
+    "R_lat": 1.0 / 6.0,
+    "L_heel": 3.0 / 6.0,
+    "R_heel": 3.0 / 6.0,
+}
 
-# Mostrar ratio (real/baseline) además del valor real en cada punto Kapandji
+# Tolerancias por desvío absoluto de share (configurables)
+KAP_TOL_GREEN = 0.07
+KAP_TOL_YELLOW = 0.15
+
+# Mostrar ratio (debug) además del share/raw en cada punto Kapandji
 SHOW_KAP_RATIO = False
-# Factor opcional de conversión a kg (None = no convertir, usar unidades crudas)
-KAP_SCALE_FACTOR = None
-# Unidad a mostrar para valor crudo ("u", "counts" o "")
-KAP_VALUE_UNIT = "kg_equiv"
+# Unidad para valor crudo mostrado (vacío = sin sufijo)
+KAP_VALUE_UNIT = ""
 KAP_CALIBRATION_SECONDS = 3.0
 KAP_CALIBRATION_MIN_SAMPLES = 20
 
@@ -156,34 +162,26 @@ def _median(vals):
 def _mean(vals):
     return (sum(vals) / len(vals)) if vals else 0.0
 
-def kap_color_by_point(key: str, value: float, baseline: float):
-    if baseline <= 1e-9:
+def kap_color_by_point(key: str, share: float):
+    expected = KAP_EXPECTED_SHARE.get(key, 0.0)
+    if expected <= 1e-9:
         return KAP_COLOR_NEUTRAL
-    ratio = value / baseline
-    if ratio < KAP_RATIO_YELLOW_MIN or ratio > KAP_RATIO_YELLOW_MAX:
-        return KAP_COLOR_RED
-    if KAP_RATIO_GREEN_MIN <= ratio <= KAP_RATIO_GREEN_MAX:
+    dev = abs(share - expected)
+    if dev <= KAP_TOL_GREEN:
         return KAP_COLOR_GREEN
-    return KAP_COLOR_YELLOW
+    if dev <= KAP_TOL_YELLOW:
+        return KAP_COLOR_YELLOW
+    return KAP_COLOR_RED
 
-def kap_point_label(value: float, baseline: float, scale_factor: float | None = None):
-    shown = value * scale_factor if scale_factor is not None else value
-    if scale_factor is not None:
-        unit = "kg"
-    else:
-        unit = KAP_VALUE_UNIT.strip()
-
-    if unit:
-        label = f"{shown:0.1f} {unit}"
-    else:
-        label = f"{shown:0.1f}"
-
+def kap_point_label(key: str, value: float, share: float):
+    unit = KAP_VALUE_UNIT.strip()
+    value_txt = f"{value:0.1f}{(' ' + unit) if unit else ''}"
+    share_txt = f"{share * 100.0:0.1f}%"
     if not SHOW_KAP_RATIO:
-        return label
-    if baseline <= 1e-9:
-        return label
-    ratio = value / baseline
-    return f"{label}\n({ratio:0.2f}x)"
+        return f"{share_txt}\n{value_txt}"
+    expected = KAP_EXPECTED_SHARE.get(key, 2.0 / 6.0)
+    ratio = (share / expected) if expected > 1e-9 else 0.0
+    return f"{share_txt}\n{value_txt}\n({ratio:0.2f}x)"
 
 
 
@@ -1190,7 +1188,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.session_condition = normalize_condition(dlg.condition())
         self.session_weight_kg = dlg.weight_kg()
         self.kap_scale_to_kg = None
-        self.kap_calib_start_t = time.time()
+        self.kap_calib_start_t = None
         self.kap_calib_samples.clear()
 
         if dlg.clear_trails():
@@ -1238,7 +1236,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lbl_rec.setVisible(True)
         self.btn_stop.setEnabled(True)
         self.btn_new_session.setEnabled(False)
-        self.statusBar().showMessage(f"Grabando: {sess_name} ({self.session_condition}) | Peso {self.session_weight_kg:0.1f} kg")
+        self.statusBar().showMessage(f"Grabando: {sess_name} ({self.session_condition})")
 
         self.refresh_sessions()
 
@@ -1337,24 +1335,26 @@ class MainWindow(QtWidgets.QMainWindow):
         return kapL, kapR
 
 
-    def update_kapandji_overlay(self, kapL, kapR, PT=0.0, baseline_map=None, scale_factor=None):
+    def update_kapandji_overlay(self, kapL, kapR, PT=0.0):
         # kapL/kapR: (forefoot, lateral, heel)
         vals = [kapL[0], kapL[1], kapL[2], kapR[0], kapR[1], kapR[2]]
         keys = ["L_med", "L_lat", "L_heel", "R_med", "R_lat", "R_heel"]
-        baseline_map = baseline_map or self.kap_baseline_live
+        PL = max(1e-9, kapL[0] + kapL[1] + kapL[2])
+        PR = max(1e-9, kapR[0] + kapR[1] + kapR[2])
         no_support = PT <= KAP_NO_SUPPORT_PT
         for i, key in enumerate(keys):
             x, y = self.kap_pos[key]
             value = vals[i]
-            baseline = baseline_map.get(key, 0.0)
+            foot_sum = PL if key.startswith("L_") else PR
+            share = value / foot_sum if foot_sum > 1e-9 else 0.0
             if no_support:
                 r, g, b = KAP_COLOR_NEUTRAL
             else:
-                r, g, b = kap_color_by_point(key, value, baseline)
+                r, g, b = kap_color_by_point(key, share)
             self.kap_items[i].setData([x], [y])
             self.kap_items[i].setBrush(pg.mkBrush(r, g, b))
             self.kap_items[i].setPen(pg.mkPen("w"))
-            self.kap_text_items[i].setText(kap_point_label(value, baseline, scale_factor))
+            self.kap_text_items[i].setText(kap_point_label(key, value, share))
             self.kap_text_items[i].setPos(x, y)
 
     def torsion_deg_from_feet(self, xl, yl, xr, yr):
@@ -1506,25 +1506,27 @@ class MainWindow(QtWidgets.QMainWindow):
             self.plot_cmp.addItem(tinfo)
 
             no_support = (PL + PR) <= KAP_NO_SUPPORT_PT
-            baseline_map = snap.get("kap_baseline", {})
 
             pos = {
                 "L_med": (cx - 6, 18), "L_lat": (cx - 11, 10), "L_heel": (cx - 8, 0),
                 "R_med": (cx + 6, 18), "R_lat": (cx + 11, 10), "R_heel": (cx + 8, 0),
             }
             keys = ["L_med", "L_lat", "L_heel", "R_med", "R_lat", "R_heel"]
+            sumL = max(1e-9, snap["L_med"] + snap["L_lat"] + snap["L_heel"])
+            sumR = max(1e-9, snap["R_med"] + snap["R_lat"] + snap["R_heel"])
             for k in keys:
                 x, y = pos[k]
                 value = snap[k]
-                baseline = baseline_map.get(k, 0.0)
+                foot_sum = sumL if k.startswith("L_") else sumR
+                share = value / foot_sum if foot_sum > 1e-9 else 0.0
                 if no_support:
                     r, g, b = KAP_COLOR_NEUTRAL
                 else:
-                    r, g, b = kap_color_by_point(k, value, baseline)
+                    r, g, b = kap_color_by_point(k, share)
                 sc = pg.ScatterPlotItem(size=18, symbol=self._kap_symbol_for_key(k), brush=pg.mkBrush(r, g, b), pen=pg.mkPen("w"))
                 sc.setData([x], [y])
                 self.plot_cmp.addItem(sc)
-                tt = pg.TextItem(kap_point_label(value, baseline, snap.get("kg_scale_factor")), anchor=(0.5, -0.6), color="w")
+                tt = pg.TextItem(kap_point_label(k, value, share), anchor=(0.5, -0.6), color="w")
                 tt.setPos(x, y)
                 self.plot_cmp.addItem(tt)
 
@@ -1838,11 +1840,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 tors.append(tor)
 
             has_raw_kap = False
-            if None not in (kg0, kg1, kg2, kg3, kg4, kg5):
+            if None not in (p0, p1, p2, p3, p4, p5):
+                kapL, kapR = self.compute_kapandji_loads(p0, p1, p2, p3, p4, p5)
+            elif None not in (kg0, kg1, kg2, kg3, kg4, kg5):
                 kapL, kapR = self.compute_kapandji_loads(kg0, kg1, kg2, kg3, kg4, kg5)
                 has_kg_cols = True
-            elif None not in (p0, p1, p2, p3, p4, p5):
-                kapL, kapR = self.compute_kapandji_loads(p0, p1, p2, p3, p4, p5)
             else:
                 kapL = kapR = None
 
@@ -2158,37 +2160,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dot_r.setData([xr],[yr])
 
         total = PL + PR
-        now_t = time.time()
-        if total > 0 and self.session_weight_kg and self.session_weight_kg > 0:
-            if self.kap_scale_to_kg is None and self.kap_calib_start_t is not None and (now_t - self.kap_calib_start_t) <= KAP_CALIBRATION_SECONDS:
-                self.kap_calib_samples.append(total)
-                if len(self.kap_calib_samples) >= KAP_CALIBRATION_MIN_SAMPLES:
-                    self.kap_scale_to_kg = self.session_weight_kg / max(1e-9, _median(self.kap_calib_samples))
-            if self.kap_scale_to_kg is None:
-                k_cur = self.session_weight_kg / max(1e-9, total)
-            else:
-                k_cur = self.kap_scale_to_kg
-        else:
-            k_cur = None
+        # Kapandji se calcula/visualiza en valores raw por pie (sin conversión a kg)
+        k_cur = None
+        kg0 = p0
+        kg1 = p1
+        kg2 = p2
+        kg3 = p3
+        kg4 = p4
+        kg5 = p5
+        PLkg = PL
+        PRkg = PR
 
-        kg0 = p0 * k_cur if k_cur is not None else p0
-        kg1 = p1 * k_cur if k_cur is not None else p1
-        kg2 = p2 * k_cur if k_cur is not None else p2
-        kg3 = p3 * k_cur if k_cur is not None else p3
-        kg4 = p4 * k_cur if k_cur is not None else p4
-        kg5 = p5 * k_cur if k_cur is not None else p5
-        PLkg = kg0 + kg1 + kg2
-        PRkg = kg3 + kg4 + kg5
-        PTkg = PLkg + PRkg
-
-        if PTkg > 0:
-            left_pct = 100.0 * PLkg / PTkg
-            right_pct = 100.0 * PRkg / PTkg
-            overload = abs(PLkg - PRkg) / PTkg
-            arrow = "←" if PLkg > PRkg else ("→" if PRkg > PLkg else "↔")
+        if total > 0:
+            left_pct = 100.0 * PL / total
+            right_pct = 100.0 * PR / total
+            overload = abs(PL - PR) / total
+            arrow = "←" if PL > PR else ("→" if PR > PL else "↔")
             self.balance.setValue(int(round(right_pct)))
             self.lbl_weights.setText(
-                f"Izquierda: {PLkg:5.1f} | Derecha: {PRkg:5.1f} | L {left_pct:5.1f}% R {right_pct:5.1f}% {arrow} | Sobrecarga: {abs(PLkg-PRkg):0.1f}"
+                f"Izquierda: {PL:5.1f} | Derecha: {PR:5.1f} | L {left_pct:5.1f}% R {right_pct:5.1f}% {arrow} | Sobrecarga: {abs(PL-PR):0.1f}"
             )
         else:
             overload = 0.0
@@ -2205,9 +2195,9 @@ class MainWindow(QtWidgets.QMainWindow):
             f"Sway: {m.sway_path:7.2f} cm | Vel: {m.mean_speed:6.2f} cm/s | RMSx: {m.rms_x:5.2f} | RMSy: {m.rms_y:5.2f} | Torsión: {torsion_deg:+.2f}°"
         )
 
-        kapL, kapR = self.compute_kapandji_loads(kg0,kg1,kg2,kg3,kg4,kg5)
+        kapL, kapR = self.compute_kapandji_loads(p0,p1,p2,p3,p4,p5)
         self._update_kap_live_baseline(kapL, kapR)
-        self.update_kapandji_overlay(kapL, kapR, PT=PL+PR, baseline_map=self.kap_baseline_live, scale_factor=k_cur)
+        self.update_kapandji_overlay(kapL, kapR, PT=PL+PR)
 
         xs, ys = self.segment_for_angle(torsion_deg, length=40.0)
         self.line_t_live.setData(xs, ys)
@@ -2223,7 +2213,7 @@ class MainWindow(QtWidgets.QMainWindow):
         rec = {
             "t": t,
             "xg": xg, "yg": yg, "xl": xl, "yl": yl, "xr": xr, "yr": yr,
-            "PL": PLkg, "PR": PRkg,
+            "PL": PL, "PR": PR,
             "overload": overload,
             "torsion_deg": torsion_deg,
             "L_med": kapL[0], "L_lat": kapL[1], "L_heel": kapL[2],
