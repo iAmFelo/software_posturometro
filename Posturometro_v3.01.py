@@ -61,10 +61,10 @@ KAP_WEIGHTS = (2.0 / 6.0, 1.0 / 6.0, 3.0 / 6.0)
 # Valores esperados por sensor (calibración cruda, ajustable por equipo)
 KAP_EXPECTED_RAW = {
     "L_med": 3000.0,
-    "L_lat": 2000.0,
+    "L_lat": 3700.0,
     "L_heel": 4000.0,
     "R_med": 3000.0,
-    "R_lat": 2000.0,
+    "R_lat": 3700.0,
     "R_heel": 4000.0,
 }
 
