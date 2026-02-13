@@ -35,7 +35,7 @@ Y_MIN, Y_MAX = -PLOT_RANGE, PLOT_RANGE
 # Zoom de trazados en comparativo (más cercano)
 CMP_TRAIL_X_RANGE = 45
 CMP_TRAIL_Y_RANGE = 12
-CMP_PANEL_OFFSETS = {"L": -30.0, "G": 0.0, "R": 30.0}
+CMP_PANEL_OFFSETS = {"L": -16.0, "G": 0.0, "R": 16.0}
 
 # Longitud de trayectoria (más corto = más “limpio”)
 TRAIL_LEN = 800
@@ -58,21 +58,14 @@ KAP_BASELINE_WINDOW = 250
 # Baseline opcional de referencia Kapandji clásica (solo interpretativo)
 KAP_WEIGHTS = (2.0 / 6.0, 1.0 / 6.0, 3.0 / 6.0)
 
-# Valores esperados por sensor (calibración cruda, ajustable por equipo)
-KAP_EXPECTED_RAW = {
-    "L_med": 3000.0,
-    "L_lat": 3700.0,
-    "L_heel": 4000.0,
-    "R_med": 3000.0,
-    "R_lat": 3700.0,
-    "R_heel": 4000.0,
+# Rangos esperados empíricos por zona Kapandji (en % del total del pie)
+KAP_EXPECTED_RANGES = {
+    "med": (25.5, 27.5),   # arriba / metatarso
+    "lat": (40.0, 42.0),   # medio / lateral
+    "heel": (33.0, 34.0),  # talón
 }
-
-# Bandas clínicas por ratio (actual/esperado)
-KAP_RATIO_GREEN_MIN = 0.85
-KAP_RATIO_GREEN_MAX = 1.15
-KAP_RATIO_YELLOW_MIN = 0.70
-KAP_RATIO_YELLOW_MAX = 1.30
+# margen adicional para zona amarilla (±5%)
+KAP_YELLOW_MARGIN = 5.0
 
 # Mostrar ratio (debug) además del valor raw en cada punto Kapandji
 SHOW_KAP_RATIO = False
@@ -97,9 +90,9 @@ INVERT_TORSION_SIGN = False  # ponelo True si la torsión sale al revés
 
 # Condiciones disponibles y colores
 CONDITION_DEFS = [
-    {"code": "NO", "label": "Postura (NO)", "short": "NO", "color": "c", "color_html": "cyan"},
-    {"code": "OCC", "label": "Boca (OCC)", "short": "OCC", "color": "y", "color_html": "yellow"},
-    {"code": "CE", "label": "Pie (CE)", "short": "CE", "color": "m", "color_html": "magenta"},
+    {"code": "NO", "label": "Postura", "short": "Postura", "color": "c", "color_html": "cyan"},
+    {"code": "OCC", "label": "Boca", "short": "Boca", "color": "y", "color_html": "yellow"},
+    {"code": "CE", "label": "Pie", "short": "Pie", "color": "m", "color_html": "magenta"},
     {"code": "BED", "label": "Bed (BED)", "short": "BED", "color": (255, 140, 0), "color_html": "#ff8c00"},
     {"code": "BEDC", "label": "Bed Corregido (BEDC)", "short": "BEDC", "color": (128, 96, 255), "color_html": "#8060ff"},
 ]
@@ -164,38 +157,46 @@ def _median(vals):
 def _mean(vals):
     return (sum(vals) / len(vals)) if vals else 0.0
 
-def kap_ratio_for_point(key: str, value: float):
-    expected = KAP_EXPECTED_RAW.get(key, 0.0)
-    if expected <= 1e-9:
-        return None
-    return value / expected
+def _kap_zone_from_key(key: str) -> str:
+    if key.endswith("_med"):
+        return "med"
+    if key.endswith("_lat"):
+        return "lat"
+    return "heel"
 
-def kap_color_by_point(key: str, value: float):
-    ratio = kap_ratio_for_point(key, value)
-    if ratio is None:
-        return KAP_COLOR_NEUTRAL
-    if KAP_RATIO_GREEN_MIN <= ratio <= KAP_RATIO_GREEN_MAX:
+def kap_color_by_point(key: str, share_pct: float):
+    zone = _kap_zone_from_key(key)
+    low, high = KAP_EXPECTED_RANGES.get(zone, (0.0, 100.0))
+    y_low = low - KAP_YELLOW_MARGIN
+    y_high = high + KAP_YELLOW_MARGIN
+    if low <= share_pct <= high:
         return KAP_COLOR_GREEN
-    if (KAP_RATIO_YELLOW_MIN <= ratio < KAP_RATIO_GREEN_MIN) or (KAP_RATIO_GREEN_MAX < ratio <= KAP_RATIO_YELLOW_MAX):
+    if y_low <= share_pct <= y_high:
         return KAP_COLOR_YELLOW
     return KAP_COLOR_RED
 
-def kap_symbol_by_ratio(ratio: float | None):
-    if ratio is None:
-        return "o"
-    if ratio > 1.0:
+def kap_symbol_by_share(key: str, share_pct: float):
+    zone = _kap_zone_from_key(key)
+    low, high = KAP_EXPECTED_RANGES.get(zone, (0.0, 100.0))
+    expected = 0.5 * (low + high)
+    if share_pct > expected:
         return "t1"
-    if ratio < 1.0:
+    if share_pct < expected:
         return "t"
     return "o"
 
-def kap_point_label(key: str, value: float):
+def kap_point_label(key: str, value: float, share: float = 0.0):
     unit = KAP_VALUE_UNIT.strip()
     value_txt = f"{value:0.1f}{(' ' + unit) if unit else ''}"
+    share_pct = share * 100.0
+    share_txt = f"{share_pct:0.1f}%"
     if not SHOW_KAP_RATIO:
-        return value_txt
-    ratio = kap_ratio_for_point(key, value)
-    return f"{value_txt}\n({ratio:0.2f}x)" if ratio is not None else value_txt
+        return f"{share_txt}\n{value_txt}"
+    zone = _kap_zone_from_key(key)
+    low, high = KAP_EXPECTED_RANGES.get(zone, (0.0, 100.0))
+    expected = 0.5 * (low + high)
+    delta = share_pct - expected
+    return f"{share_txt}\n{value_txt}\n(Δ {delta:+0.1f}%)"
 
 
 
@@ -335,13 +336,6 @@ class NewSessionDialog(QtWidgets.QDialog):
         self.chk_clear.setChecked(True)
         layout.addRow("", self.chk_clear)
 
-        self.edit_weight = QtWidgets.QDoubleSpinBox()
-        self.edit_weight.setRange(1.0, 300.0)
-        self.edit_weight.setDecimals(1)
-        self.edit_weight.setSingleStep(0.5)
-        self.edit_weight.setValue(70.0)
-        self.edit_weight.setSuffix(" kg")
-        layout.addRow("Peso (kg):", self.edit_weight)
 
         btns = QtWidgets.QHBoxLayout()
         ok = QtWidgets.QPushButton("Iniciar")
@@ -358,13 +352,10 @@ class NewSessionDialog(QtWidgets.QDialog):
         return self.combo_cond.currentText()
     def clear_trails(self):
         return self.chk_clear.isChecked()
-    def weight_kg(self):
-        return float(self.edit_weight.value())
-
 
 
 def normalize_condition(cond_text: str) -> str:
-    """Convierte textos como 'Postura (NO)' a 'NO'."""
+    """Convierte etiquetas de condición a código interno (NO/OCC/CE/BED/BEDC)."""
     if not cond_text:
         return "?"
     t = cond_text.strip().upper()
@@ -699,6 +690,14 @@ class MainWindow(QtWidgets.QMainWindow):
         cmp_root = QtWidgets.QVBoxLayout(self.tab_cmp)
         cmp_root.setContentsMargins(0, 0, 0, 0)
 
+        legend_html = "  |  ".join(
+            [f'<span style="color:{cond["color_html"]}">{cond["short"]}</span>' for cond in CONDITION_DEFS]
+        )
+        self.lbl_cmp_legend = QtWidgets.QLabel(legend_html)
+        self.lbl_cmp_legend.setTextFormat(QtCore.Qt.RichText)
+        self.lbl_cmp_legend.setWordWrap(True)
+        cmp_root.addWidget(self.lbl_cmp_legend, 0)
+
         self.cmp_scroll = QtWidgets.QScrollArea()
         self.cmp_scroll.setWidgetResizable(True)
         cmp_root.addWidget(self.cmp_scroll, 1)
@@ -744,14 +743,6 @@ class MainWindow(QtWidgets.QMainWindow):
         ctrl.addSpacing(12)
         ctrl.addWidget(self.btn_cmp_clear)
         ctrl.addStretch(1)
-
-        # ===== Leyenda de colores =====
-        legend_html = "  |  ".join(
-            f'<span style="color:{cond["color_html"]};"><b>{cond["label"]}</b></span>'
-            for cond in CONDITION_DEFS
-        )
-        self.lbl_cmp_legend = QtWidgets.QLabel(legend_html)
-        v3.addWidget(self.lbl_cmp_legend)
 
         # ===== Plot SUPERPUESTO (arriba) =====
         self.plot_cmp_super = pg.PlotWidget()
@@ -1200,7 +1191,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         folder = slugify(sess_name)
         self.session_condition = normalize_condition(dlg.condition())
-        self.session_weight_kg = dlg.weight_kg()
+        self.session_weight_kg = None
         self.kap_scale_to_kg = None
         self.kap_calib_start_t = None
         self.kap_calib_samples.clear()
@@ -1234,7 +1225,6 @@ class MainWindow(QtWidgets.QMainWindow):
             "dob": dob_iso,
             "condition": self.session_condition,
             "session_name": sess_name,
-            "weight_kg": self.session_weight_kg,
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "port": self.current_port,
             "baud": BAUD,
@@ -1359,17 +1349,19 @@ class MainWindow(QtWidgets.QMainWindow):
         for i, key in enumerate(keys):
             x, y = self.kap_pos[key]
             value = vals[i]
-            ratio = kap_ratio_for_point(key, value)
+            foot_sum = PL if key.startswith("L_") else PR
+            share = value / foot_sum if foot_sum > 1e-9 else 0.0
+            share_pct = share * 100.0
             if no_support:
                 r, g, b = KAP_COLOR_NEUTRAL
                 symbol = "o"
             else:
-                r, g, b = kap_color_by_point(key, value)
-                symbol = kap_symbol_by_ratio(ratio)
+                r, g, b = kap_color_by_point(key, share_pct)
+                symbol = kap_symbol_by_share(key, share_pct)
             self.kap_items[i].setData([x], [y], symbol=symbol)
             self.kap_items[i].setBrush(pg.mkBrush(r, g, b))
             self.kap_items[i].setPen(pg.mkPen("w"))
-            self.kap_text_items[i].setText(kap_point_label(key, value))
+            self.kap_text_items[i].setText(kap_point_label(key, value, share))
             self.kap_text_items[i].setPos(x, y)
 
     def torsion_deg_from_feet(self, xl, yl, xr, yr):
@@ -1532,17 +1524,19 @@ class MainWindow(QtWidgets.QMainWindow):
             for k in keys:
                 x, y = pos[k]
                 value = snap[k]
-                ratio = kap_ratio_for_point(k, value)
+                foot_sum = sumL if k.startswith("L_") else sumR
+                share = value / foot_sum if foot_sum > 1e-9 else 0.0
+                share_pct = share * 100.0
                 if no_support:
                     r, g, b = KAP_COLOR_NEUTRAL
                     symbol = "o"
                 else:
-                    r, g, b = kap_color_by_point(k, value)
-                    symbol = kap_symbol_by_ratio(ratio)
+                    r, g, b = kap_color_by_point(k, share_pct)
+                    symbol = kap_symbol_by_share(k, share_pct)
                 sc = pg.ScatterPlotItem(size=18, symbol=symbol, brush=pg.mkBrush(r, g, b), pen=pg.mkPen("w"))
                 sc.setData([x], [y])
                 self.plot_cmp.addItem(sc)
-                tt = pg.TextItem(kap_point_label(k, value), anchor=(0.5, -0.6), color="w")
+                tt = pg.TextItem(kap_point_label(k, value, share), anchor=(0.5, -0.6), color="w")
                 tt.setPos(x, y)
                 self.plot_cmp.addItem(tt)
 
