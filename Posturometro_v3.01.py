@@ -1271,6 +1271,19 @@ class MainWindow(QtWidgets.QMainWindow):
                     json.dump(meta, f, indent=2, ensure_ascii=False)
         except:
             pass
+        try:
+            if self.current_session_dir:
+                meta_path = os.path.join(self.current_session_dir, "meta.json")
+                if os.path.isfile(meta_path):
+                    with open(meta_path, "r", encoding="utf-8") as f:
+                        meta = json.load(f)
+                else:
+                    meta = {}
+                meta["kg_scale_factor"] = self.kap_scale_to_kg
+                with open(meta_path, "w", encoding="utf-8") as f:
+                    json.dump(meta, f, indent=2, ensure_ascii=False)
+        except:
+            pass
         self.csv_file = None
         self.csv_writer = None
         self.session_weight_kg = None
