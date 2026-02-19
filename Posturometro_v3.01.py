@@ -65,7 +65,7 @@ KAP_EXPECTED_RANGES = {
     "heel": (33.0, 34.0),  # talón
 }
 # margen adicional para zona amarilla (±5%)
-KAP_YELLOW_MARGIN = 5.0
+KAP_YELLOW_MARGIN = 2.0
 
 # Mostrar ratio (debug) además del valor raw en cada punto Kapandji
 SHOW_KAP_RATIO = False
@@ -187,7 +187,7 @@ def kap_symbol_by_share(key: str, share_pct: float):
 
 def kap_point_label(key: str, value: float, share: float = 0.0):
     unit = KAP_VALUE_UNIT.strip()
-    value_txt = f"{value:0.1f}{(' ' + unit) if unit else ''}"
+    value_txt = f"{int(round(value))}{(' ' + unit) if unit else ''}"
     share_pct = share * 100.0
     share_txt = f"{share_pct:0.1f}%"
     if not SHOW_KAP_RATIO:
@@ -1271,19 +1271,6 @@ class MainWindow(QtWidgets.QMainWindow):
                     json.dump(meta, f, indent=2, ensure_ascii=False)
         except:
             pass
-        try:
-            if self.current_session_dir:
-                meta_path = os.path.join(self.current_session_dir, "meta.json")
-                if os.path.isfile(meta_path):
-                    with open(meta_path, "r", encoding="utf-8") as f:
-                        meta = json.load(f)
-                else:
-                    meta = {}
-                meta["kg_scale_factor"] = self.kap_scale_to_kg
-                with open(meta_path, "w", encoding="utf-8") as f:
-                    json.dump(meta, f, indent=2, ensure_ascii=False)
-        except:
-            pass
         self.csv_file = None
         self.csv_writer = None
         self.session_weight_kg = None
@@ -1518,8 +1505,21 @@ class MainWindow(QtWidgets.QMainWindow):
                 arrow = "↔"
 
             arrow_html = f'<span style="font-size:16pt;">{arrow}</span>'
-            line1 = f"L {left_pct:0.1f}% | R {right_pct:0.1f}% {arrow_html}"
-            line2 = f"Sobrecarga {abs(PL-PR):0.1f}"
+            asim = abs(left_pct - right_pct)
+            if asim < 2.0:
+                bal_text = "Centrado"
+                bal_color = "#3cc85a"
+            elif asim < 4.0:
+                side = "izquierda" if PL > PR else "derecha"
+                bal_text = f"Leve {side}"
+                bal_color = "#f0c800"
+            else:
+                side = "izquierda" if PL > PR else "derecha"
+                bal_text = f"Marcado {side}"
+                bal_color = "#dc3232"
+
+            line1 = f"Izq {left_pct:0.1f}% | Der {right_pct:0.1f}% {arrow_html}"
+            line2 = f'Balance: <span style="color:{bal_color};"><b>{bal_text}</b></span>'
             tinfo = pg.TextItem(anchor=(0.5, 1.0), color="w")
             tinfo.setHtml(f"{line1}<br>{line2}")
             tinfo.setPos(cx, -15)
@@ -1558,6 +1558,15 @@ class MainWindow(QtWidgets.QMainWindow):
             xs = [x + cx for x in xs]
             ys = [y + 25 for y in ys]
             self.plot_cmp.plot(xs, ys, pen=color_pen)
+
+            torsion_color = CONDITION_BY_CODE.get(cond, {}).get("color", "w")
+            torsion_label = pg.TextItem(
+                f"Torsión: {snap['torsion_deg']:+0.2f}°",
+                anchor=(0.5, 0.0),
+                color=torsion_color,
+            )
+            torsion_label.setPos(cx, 30)
+            self.plot_cmp.addItem(torsion_label)
 
         for cond in CONDITION_DEFS:
             code = cond["code"]
