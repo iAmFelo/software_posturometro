@@ -1094,11 +1094,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
         session_rows = []
         for folder in self._discover_session_paths(patient_dir):
+            session_path = os.path.join(patient_dir, folder)
             meta_path = os.path.join(patient_dir, folder, "meta.json")
             cond = "?"
-            date_str = folder  # fallback
             display_name = folder
-            sort_key = folder
+            created_dt = None
+            folder_mtime = None
+
+            try:
+                folder_mtime = datetime.fromtimestamp(os.path.getmtime(session_path))
+            except:
+                pass
 
             if os.path.isfile(meta_path):
                 try:
@@ -1106,22 +1112,39 @@ class MainWindow(QtWidgets.QMainWindow):
                         meta = json.load(f)
                     cond = normalize_condition(meta.get("condition", "?"))
                     created_at = meta.get("created_at", "")
-                    # created_at: "2026-01-17T16:10:05"
-                    if "T" in created_at:
-                        date_str = created_at.replace("T", " ")
+                    created_dt = datetime.fromisoformat(created_at)
                     display_name = meta.get("session_name", folder)
                     folder_unique_id = meta.get("session_folder_id", folder)
                     display_name = f"{display_name} [{folder_unique_id}]"
-                    sort_key = created_at or folder
                 except:
                     pass
 
-            session_rows.append((sort_key, folder, display_name, date_str, cond))
+            if created_dt is None:
+                created_dt = folder_mtime
 
-        session_rows.sort(key=lambda x: x[0], reverse=True)
+            session_rows.append({
+                "folder": folder,
+                "display_name": display_name,
+                "condition": cond,
+                "created_dt": created_dt,
+                "folder_mtime": folder_mtime,
+            })
 
-        for _, folder, display_name, date_str, cond in session_rows:
-            label = f"{display_name}  |  {date_str}  |  {cond}"
+        session_rows.sort(
+            key=lambda row: (
+                row["created_dt"] is not None,
+                row["created_dt"] or row["folder_mtime"] or datetime.min,
+                row["folder"],
+            ),
+            reverse=True,
+        )
+
+        for row in session_rows:
+            fecha = row["created_dt"].strftime('%d/%m/%y') if row["created_dt"] else row["folder"]
+            display_name = row["display_name"]
+            cond = row["condition"]
+            folder = row["folder"]
+            label = f"{display_name} | {fecha} | {cond}"
             it = QtWidgets.QListWidgetItem(label)
             # IMPORTANTÍSIMO: guardamos el nombre real de la carpeta para abrir session.csv después
             it.setData(QtCore.Qt.UserRole, folder)
