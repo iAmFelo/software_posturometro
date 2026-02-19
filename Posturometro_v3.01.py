@@ -775,34 +775,31 @@ class MainWindow(QtWidgets.QMainWindow):
         # ===== Plot TRAZADOS COP (comparación) =====
         v3.addWidget(QtWidgets.QLabel("<b>Trazados COP (Izq / Global / Der)</b>"))
 
-        self.plot_cmp_trails = pg.PlotWidget()
-        self.plot_cmp_trails.setAspectLocked(True)
-        self.plot_cmp_trails.showGrid(x=True, y=True, alpha=0.2)
-        self.plot_cmp_trails.setXRange(-CMP_TRAIL_X_RANGE, CMP_TRAIL_X_RANGE)
-        self.plot_cmp_trails.setYRange(-CMP_TRAIL_Y_RANGE, CMP_TRAIL_Y_RANGE)
+        self.plot_cmp_trails = pg.GraphicsLayoutWidget()
         self.plot_cmp_trails.setMinimumHeight(400)
         v3.addWidget(self.plot_cmp_trails, 2)
 
-        self.plot_cmp_trails.setMouseEnabled(False, False)
-        self.plot_cmp_trails.getViewBox().setMenuEnabled(False)
+        self.tr_cmp_plots = {}
+        for idx, comp in enumerate(["L", "G", "R"]):
+            if idx > 0:
+                self.plot_cmp_trails.nextColumn()
 
-        # líneas separadoras verticales (3 paneles)
-        for x in [
-            (CMP_PANEL_OFFSETS["L"] + CMP_PANEL_OFFSETS["G"]) / 2.0,
-            (CMP_PANEL_OFFSETS["G"] + CMP_PANEL_OFFSETS["R"]) / 2.0,
-        ]:
-            self.plot_cmp_trails.addItem(pg.InfiniteLine(pos=x, angle=90, pen=pg.mkPen(120, 120, 120)))
+            plot = self.plot_cmp_trails.addPlot(title={
+                "L": "Pie Izquierdo (L)",
+                "G": "Baricentro (G)",
+                "R": "Pie Derecho (R)",
+            }[comp])
+            plot.setAspectLocked(True)
+            plot.showGrid(x=True, y=True, alpha=0.2)
+            plot.setXRange(-CMP_TRAIL_X_RANGE, CMP_TRAIL_X_RANGE)
+            plot.setYRange(-CMP_TRAIL_Y_RANGE, CMP_TRAIL_Y_RANGE)
+            plot.setMouseEnabled(False, False)
+            plot.getViewBox().setMenuEnabled(False)
+            plot.hideButtons()
+            plot.addItem(pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen("w", width=1)))
+            plot.addItem(pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen("w", width=1)))
 
-        # línea central horizontal y vertical por panel (para referencia)
-        self.plot_cmp_trails.addItem(pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen("w", width=1)))
-
-        # títulos paneles
-        for label, cx in [("Foot support (L)", CMP_PANEL_OFFSETS["L"]),
-                          ("Barycenter (G)", CMP_PANEL_OFFSETS["G"]),
-                          ("Foot support (R)", CMP_PANEL_OFFSETS["R"])]:
-            ti = pg.TextItem(label, anchor=(0.5, 0), color="w")
-            ti.setPos(cx, CMP_TRAIL_Y_RANGE - 1)
-            self.plot_cmp_trails.addItem(ti)
+            self.tr_cmp_plots[comp] = plot
 
         # Curvas: global / izq / der, por condición
         # Colores definidos en CONDITION_DEFS
@@ -811,9 +808,9 @@ class MainWindow(QtWidgets.QMainWindow):
             code = cond["code"]
             color = cond["color"]
             self.tr_cmp[code] = {
-                "L": self.plot_cmp_trails.plot([], [], pen=pg.mkPen(color, width=2)),
-                "G": self.plot_cmp_trails.plot([], [], pen=pg.mkPen(color, width=3)),
-                "R": self.plot_cmp_trails.plot([], [], pen=pg.mkPen(color, width=2)),
+                "L": self.tr_cmp_plots["L"].plot([], [], pen=pg.mkPen(color, width=2)),
+                "G": self.tr_cmp_plots["G"].plot([], [], pen=pg.mkPen(color, width=3)),
+                "R": self.tr_cmp_plots["R"].plot([], [], pen=pg.mkPen(color, width=2)),
             }
 
         # ===== Separador visual =====
@@ -1578,15 +1575,25 @@ class MainWindow(QtWidgets.QMainWindow):
             chk = self.cmp_checks.get(cond)
             return chk.isChecked() if chk else True
 
-        # offset por panel (en X)
-        panel_x = CMP_PANEL_OFFSETS
+        # offset bidimensional (por condición + por componente)
+        condition_x = CMP_CONDITION_OFFSETS
+        component_x = CMP_COMPONENT_OFFSETS
 
-        def set_curve(curve, pts, xoff, visible=True):
+        def set_curve(curve, pts, cond, comp, visible=True):
             curve.setVisible(visible)
             if visible and pts:
-                xs = [p[0] + xoff for p in pts]
-                ys = [p[1] for p in pts]
-                curve.setData(xs, ys)
+                xs_raw = [p[0] for p in pts]
+                ys_raw = [p[1] for p in pts]
+
+                if CMP_RECENTER_COMPONENTS.get(comp, False):
+                    cx = _median(xs_raw)
+                    cy = _median(ys_raw)
+                    xs_raw = [x - cx for x in xs_raw]
+                    ys_raw = [y - cy for y in ys_raw]
+
+                xoff = condition_x.get(cond, 0.0) + component_x.get(comp, 0.0)
+                xs = [x + xoff for x in xs_raw]
+                curve.setData(xs, ys_raw)
             else:
                 curve.setData([], [])
 
@@ -1604,9 +1611,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.tr_cmp[cond][comp].setData([], [])
                 continue
 
-            set_curve(self.tr_cmp[cond]["L"], tr.get("L", []), panel_x["L"], visible=vis)
-            set_curve(self.tr_cmp[cond]["G"], tr.get("G", []), panel_x["G"], visible=vis)
-            set_curve(self.tr_cmp[cond]["R"], tr.get("R", []), panel_x["R"], visible=vis)
+            set_curve(self.tr_cmp[cond]["L"], tr.get("L", []), cond, "L", visible=vis)
+            set_curve(self.tr_cmp[cond]["G"], tr.get("G", []), cond, "G", visible=vis)
+            set_curve(self.tr_cmp[cond]["R"], tr.get("R", []), cond, "R", visible=vis)
 
     # ---------- Replay (síntesis) ----------
     def replay_selected_session(self):
