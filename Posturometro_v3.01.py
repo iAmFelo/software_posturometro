@@ -1264,12 +1264,17 @@ class MainWindow(QtWidgets.QMainWindow):
             json.dump(meta, f, indent=2, ensure_ascii=False)
 
         # ===== ESTADO =====
+        if self.paused:
+            self.paused = False
+            self.btn_pause.setChecked(False)
+            self.btn_pause.setText("PAUSA")
+
         self.recording = True
         if hasattr(self, "lbl_rec"):
             self.lbl_rec.setVisible(True)
         self.btn_stop.setEnabled(True)
         self.btn_new_session.setEnabled(False)
-        self.statusBar().showMessage(f"Grabando: {sess_name} ({self.session_condition})")
+        self.statusBar().showMessage(f"Grabando LIVE: {sess_name} ({self.session_condition})")
 
         self.refresh_sessions()
 
