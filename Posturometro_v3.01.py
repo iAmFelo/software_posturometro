@@ -355,16 +355,46 @@ class NewSessionDialog(QtWidgets.QDialog):
 
 
 def normalize_condition(cond_text: str) -> str:
-    """Convierte etiquetas de condición a código interno (NO/OCC/CE/BED/BEDC)."""
+    """Convierte etiquetas/códigos de condición a código interno (NO/OCC/CE/BED/BEDC)."""
     if not cond_text:
         return "?"
+
     t = cond_text.strip().upper()
-    if "BED CORREGIDO" in t or "BEDC" in t:
-        return "BEDC"
+    if not t:
+        return "?"
+
+    # etiquetas de UI explícitas
+    if t == "POSTURA":
+        return "NO"
+    if t == "BOCA":
+        return "OCC"
+    if t == "PIE":
+        return "CE"
+
+    # compatibilidad con códigos directos y variantes de escritura
+    normalized = re.sub(r"[^A-Z0-9]", "", t)
+    variants = {
+        "NO": "NO",
+        "POSTURAL": "NO",
+        "OCC": "OCC",
+        "OCLUSION": "OCC",
+        "OCLUSIONCENTRICA": "OCC",
+        "OCCLUSION": "OCC",
+        "CE": "CE",
+        "OJOSCERRADOS": "CE",
+        "CERRADOS": "CE",
+        "BED": "BED",
+        "BEDC": "BEDC",
+        "BEDCORREGIDO": "BEDC",
+    }
+    if normalized in variants:
+        return variants[normalized]
+
     for key in CONDITION_CODES:
-        if key in t:
+        if key in normalized:
             return key
-    return cond_text.strip()
+
+    return "?"
 
 # ===================== PORT DETECTION =====================
 def port_score(p) -> int:
@@ -1188,6 +1218,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         folder = slugify(sess_name)
         self.session_condition = normalize_condition(dlg.condition())
+        if self.session_condition not in CONDITION_CODES:
+            self.session_condition = "?"
         self.session_weight_kg = None
         self.kap_scale_to_kg = None
         self.kap_calib_start_t = None
@@ -1220,7 +1252,7 @@ class MainWindow(QtWidgets.QMainWindow):
         meta = {
             "patient": pname,
             "dob": dob_iso,
-            "condition": self.session_condition,
+            "condition": normalize_condition(self.session_condition),
             "session_name": sess_name,
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "port": self.current_port,
@@ -1263,6 +1295,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         meta = json.load(f)
                 else:
                     meta = {}
+                meta["condition"] = normalize_condition(meta.get("condition", self.session_condition))
                 meta["kg_scale_factor"] = self.kap_scale_to_kg
                 with open(meta_path, "w", encoding="utf-8") as f:
                     json.dump(meta, f, indent=2, ensure_ascii=False)
@@ -1991,15 +2024,20 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # ---- 1) mapear por meta.json si se puede ----
         mapping = {}
-        needs_manual = False
+        missing_from_meta = False
+        duplicated_in_meta = False
         for s in sessions:
-            if s["cond"] in CONDITION_CODES and s["cond"] not in mapping:
-                mapping[s["cond"]] = s
-            else:
-                needs_manual = True
+            cond = s["cond"]
+            if cond not in CONDITION_CODES:
+                missing_from_meta = True
+                continue
+            if cond in mapping:
+                duplicated_in_meta = True
+                continue
+            mapping[cond] = s
 
-        # ---- 2) si falta algo o hay duplicados, pedir asignación manual ----
-        if needs_manual or len(mapping) != len(sessions):
+        # ---- 2) si hay faltantes/duplicados reales, pedir asignación manual ----
+        if missing_from_meta or duplicated_in_meta:
             dlg = QtWidgets.QDialog(self)
             dlg.setWindowTitle("Asignar condiciones a sesiones")
             lay = QtWidgets.QVBoxLayout(dlg)
