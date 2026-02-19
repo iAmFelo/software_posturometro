@@ -1054,6 +1054,32 @@ class MainWindow(QtWidgets.QMainWindow):
     def patient_folder(self, patient_name: str) -> str:
         return os.path.join(PATIENTS_DIR, slugify(patient_name))
 
+    def _make_unique_child_dir(self, parent_dir: str, desired_name: str) -> tuple[str, str]:
+        base_name = slugify(desired_name) or "Sesion"
+        candidate = base_name
+        idx = 1
+        while os.path.exists(os.path.join(parent_dir, candidate)):
+            candidate = f"{base_name}_{idx:02d}"
+            idx += 1
+        return candidate, os.path.join(parent_dir, candidate)
+
+    def _discover_session_paths(self, patient_dir: str):
+        """
+        Devuelve rutas relativas de sesión dentro de patient_dir.
+        Soporta estructura legacy: <Paciente>/<Sesion>/session.csv
+        y nueva estructura: <Paciente>/<SesionBase>/<CONDICION>/session.csv
+        """
+        found = []
+        for root, dirs, files in os.walk(patient_dir):
+            rel_root = os.path.relpath(root, patient_dir)
+            depth = 0 if rel_root == "." else rel_root.count(os.sep) + 1
+            if depth > 2:
+                dirs[:] = []
+                continue
+            if rel_root != "." and "session.csv" in files:
+                found.append(rel_root)
+        return found
+
     def refresh_sessions(self):
         self.list_sessions.clear()
 
@@ -1066,14 +1092,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if not os.path.isdir(patient_dir):
             return
 
-        session_folders = [d for d in os.listdir(patient_dir) if os.path.isdir(os.path.join(patient_dir, d))]
-        session_folders.sort(reverse=True)
-
-        for folder in session_folders:
+        session_rows = []
+        for folder in self._discover_session_paths(patient_dir):
             meta_path = os.path.join(patient_dir, folder, "meta.json")
             cond = "?"
             date_str = folder  # fallback
             display_name = folder
+            sort_key = folder
 
             if os.path.isfile(meta_path):
                 try:
@@ -1085,9 +1110,17 @@ class MainWindow(QtWidgets.QMainWindow):
                     if "T" in created_at:
                         date_str = created_at.replace("T", " ")
                     display_name = meta.get("session_name", folder)
+                    folder_unique_id = meta.get("session_folder_id", folder)
+                    display_name = f"{display_name} [{folder_unique_id}]"
+                    sort_key = created_at or folder
                 except:
                     pass
 
+            session_rows.append((sort_key, folder, display_name, date_str, cond))
+
+        session_rows.sort(key=lambda x: x[0], reverse=True)
+
+        for _, folder, display_name, date_str, cond in session_rows:
             label = f"{display_name}  |  {date_str}  |  {cond}"
             it = QtWidgets.QListWidgetItem(label)
             # IMPORTANTÍSIMO: guardamos el nombre real de la carpeta para abrir session.csv después
@@ -1216,10 +1249,11 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "Sesión", "Nombre de sesión inválido.")
             return
 
-        folder = slugify(sess_name)
+        session_base_name = slugify(sess_name) or "Sesion"
         self.session_condition = normalize_condition(dlg.condition())
         if self.session_condition not in CONDITION_CODES:
             self.session_condition = "?"
+        session_condition_folder = self.session_condition if self.session_condition != "?" else "SIN_COND"
         self.session_weight_kg = None
         self.kap_scale_to_kg = None
         self.kap_calib_start_t = None
@@ -1229,9 +1263,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.clear_all()
 
         # ===== crear carpeta de sesión =====
-        session_dir = os.path.join(self.patient_folder(pname), folder)
-        os.makedirs(session_dir, exist_ok=True)
+        patient_dir = self.patient_folder(pname)
+        os.makedirs(patient_dir, exist_ok=True)
+        base_dir = os.path.join(patient_dir, session_base_name)
+        os.makedirs(base_dir, exist_ok=True)
+        session_folder_id, session_dir = self._make_unique_child_dir(base_dir, session_condition_folder)
+        os.makedirs(session_dir, exist_ok=False)
         self.current_session_dir = session_dir
+        session_rel_path = os.path.relpath(session_dir, patient_dir)
 
         # ===== CSV =====
         csv_path = os.path.join(session_dir, "session.csv")
@@ -1254,6 +1293,9 @@ class MainWindow(QtWidgets.QMainWindow):
             "dob": dob_iso,
             "condition": normalize_condition(self.session_condition),
             "session_name": sess_name,
+            "session_folder_visible": session_base_name,
+            "session_folder_id": session_folder_id,
+            "session_folder_relpath": session_rel_path,
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "port": self.current_port,
             "baud": BAUD,
@@ -1274,7 +1316,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lbl_rec.setVisible(True)
         self.btn_stop.setEnabled(True)
         self.btn_new_session.setEnabled(False)
-        self.statusBar().showMessage(f"Grabando LIVE: {sess_name} ({self.session_condition})")
+        self.statusBar().showMessage(
+            f"Grabando LIVE: {sess_name} → {session_rel_path} ({self.session_condition})"
+        )
 
         self.refresh_sessions()
 
