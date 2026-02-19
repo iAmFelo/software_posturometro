@@ -13,7 +13,7 @@ from collections import deque
 import serial
 import serial.tools.list_ports
 
-from PySide6 import QtWidgets, QtCore
+from PySide6 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 
 
@@ -33,9 +33,17 @@ X_MIN, X_MAX = -PLOT_RANGE, PLOT_RANGE
 Y_MIN, Y_MAX = -PLOT_RANGE, PLOT_RANGE
 
 # Zoom de trazados en comparativo (más cercano)
-CMP_TRAIL_X_RANGE = 45
-CMP_TRAIL_Y_RANGE = 12
-CMP_PANEL_OFFSETS = {"L": -16.0, "G": 0.0, "R": 16.0}
+CMP_TRAIL_X_RANGE = 3
+CMP_TRAIL_Y_RANGE = 3
+CMP_COMPONENT_OFFSETS = {"L": 0.0, "G": 0.0, "R": 0.0}
+CMP_CONDITION_OFFSETS = {
+    "NO": -0.30,
+    "OA": -0.10,
+    "OC": 0.10,
+    "CA": 0.30,
+}
+# Recentrar trazados por componente (sobre mediana XY) para comparar detalle
+CMP_RECENTER_COMPONENTS = {"L": True, "G": False, "R": True}
 
 # Longitud de trayectoria (más corto = más “limpio”)
 TRAIL_LEN = 800
@@ -561,6 +569,8 @@ class MainWindow(QtWidgets.QMainWindow):
         left.addWidget(QtWidgets.QLabel("<b>Sesiones</b>"))
         self.list_sessions = QtWidgets.QListWidget()
         self.list_sessions.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        mono = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
+        self.list_sessions.setFont(mono)
 
         left.addWidget(self.list_sessions, 1)
 
